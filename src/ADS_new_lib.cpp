@@ -30,6 +30,10 @@ void SetRegisterValue(uint8_t regAdress, uint8_t regValue);
 int32_t read_Value1();
 int32_t read_Value2();
 void displayAllRegisters();
+void showModeSelectionMenu();
+void selectDifferentialChannels();
+void selectSingleEndedChannels();
+void parseChannelSelection(String input);
 
 float myVolts = 1.0000;
 int32_t val1;//Holds the returned value
@@ -194,6 +198,34 @@ ADS1255/6. A shorted sensor produces a very small signal while an open-circuit s
 //Global variables for interrupt handling
 volatile int DRDY_state = HIGH;
 
+// Global variables for mode selection and buffering
+bool useDifferentialMode = true;
+uint8_t selectedChannels[8] = {0};
+uint8_t numSelectedChannels = 0;
+uint8_t currentChannelIndex = 0;
+
+// Data buffering system for high-speed sampling
+#define BUFFER_SIZE 512  // ESP32 internal buffer size
+#define BATCH_SIZE 32    // Send data in batches to reduce UART load
+
+struct DataPoint {
+  uint8_t channel;
+  int32_t raw_value;
+  float voltage;
+  unsigned long timestamp;
+};
+
+DataPoint dataBuffer[BUFFER_SIZE];
+uint16_t bufferWriteIndex = 0;
+uint16_t bufferReadIndex = 0;
+uint16_t bufferedSamples = 0;
+
+// Timing control
+unsigned long lastSampleTime = 0;
+unsigned long lastTransmitTime = 0;
+const unsigned long SAMPLE_INTERVAL = 33;  // 30kSPS = 33.3us
+const unsigned long TRANSMIT_INTERVAL = 50000; // Transmit every 50ms
+
 void setup() {
   delay(1000);//let everything settle
   DEBUG_SERIAL.begin(115200);
@@ -241,37 +273,38 @@ void setup() {
   DEBUG_SERIAL.println("After initADS() call - ADS1256 initialization complete.");
   DEBUG_SERIAL.flush();
   
-  // Wait for user input before starting data collection
-  DEBUG_SERIAL.println();
-  DEBUG_SERIAL.println("=== System Ready ===");
-  DEBUG_SERIAL.println("Press ENTER to start data collection...");
-  DEBUG_SERIAL.flush();
-  
-  // Wait for Enter key
-  while (true) {
-    if (DEBUG_SERIAL.available() > 0) {
-      String input = DEBUG_SERIAL.readStringUntil('\n');
-      DEBUG_SERIAL.println("Enter key detected, continuing...");
-      DEBUG_SERIAL.flush();
-      break; // Exit the loop when any input is received
-    }
-    delay(100); // Small delay to prevent excessive checking
-  }
-  
-  DEBUG_SERIAL.println("About to display registers...");
-  DEBUG_SERIAL.flush();
+  // Mode selection interface
+  showModeSelectionMenu();
   
   // Display all register values before starting
   displayAllRegisters();
   
   DEBUG_SERIAL.println();
   DEBUG_SERIAL.println("=== Starting Data Collection ===");
+  DEBUG_SERIAL.print("Mode: ");
+  if (useDifferentialMode) {
+    DEBUG_SERIAL.println("Differential Input");
+  } else {
+    DEBUG_SERIAL.println("Single-Ended Input");
+  }
+  DEBUG_SERIAL.print("Selected channels: ");
+  for (int i = 0; i < numSelectedChannels; i++) {
+    DEBUG_SERIAL.print(selectedChannels[i]);
+    if (i < numSelectedChannels - 1) DEBUG_SERIAL.print(", ");
+  }
+  DEBUG_SERIAL.println();
+  DEBUG_SERIAL.println("Sample Rate: 30000 SPS (Maximum)");
   DEBUG_SERIAL.println("Data will be sent to Hardware UART (GPIO21/20)");
   DEBUG_SERIAL.println("Format: CHx:raw_value,voltage");
   DEBUG_SERIAL.flush();
   
   // Send startup message to data UART
   DATA_SERIAL.println("# ADS1256 Data Stream Started");
+  if (useDifferentialMode) {
+    DATA_SERIAL.println("# Mode: Differential");
+  } else {
+    DATA_SERIAL.println("# Mode: Single-Ended");
+  }
   DATA_SERIAL.println("# Format: CHx:raw_value,voltage");
   
   DEBUG_SERIAL.println("Setup complete - entering main loop");
@@ -279,50 +312,91 @@ void setup() {
 }
 
 void loop() {
-  if (micros() > myTimer) {
-    // Adjusted timing to match data rate: 1000 SPS = 1000 microseconds between readings
-    myTimer = micros() + 1000; // 1000 SPS (much slower than 30,000 SPS hardware setting)
+  unsigned long currentTime = micros();
+  
+  // High-speed sampling: 30kSPS
+  if (currentTime - lastSampleTime >= SAMPLE_INTERVAL) {
+    lastSampleTime = currentTime;
     
-    //swap between channels
-    if (myChannel < 1) {
-      myChannel = 1;
+    if (numSelectedChannels == 0) return;
+    
+    // Get current channel from selected channels array
+    uint8_t currentChannel = selectedChannels[currentChannelIndex];
+    
+    // Configure channel
+    if (useDifferentialMode) {
+      uint8_t muxValue;
+      switch (currentChannel) {
+        case 0: muxValue = 0x01; break; // AIN0-AIN1
+        case 1: muxValue = 0x10; break; // AIN1-AIN0
+        case 2: muxValue = 0x23; break; // AIN2-AIN3
+        case 3: muxValue = 0x32; break; // AIN3-AIN2
+        case 4: muxValue = 0x45; break; // AIN4-AIN5
+        case 5: muxValue = 0x54; break; // AIN5-AIN4
+        case 6: muxValue = 0x67; break; // AIN6-AIN7
+        case 7: muxValue = 0x76; break; // AIN7-AIN6
+        default: muxValue = 0x01; break;
+      }
+      swapChannel(muxValue);
     } else {
-      myChannel = 0;
+      uint8_t muxValue = (currentChannel << 4) | 0x08; // AINx(+) - AINCOM(-)
+      swapChannel(muxValue);
     }
 
-    if (myChannel < 1) {
-      swapChannel(0x01); //0-1 differential between channels
-      // Send channel info to hardware UART (data stream)
-      DATA_SERIAL.print("CH0:");
-    } else {
-      swapChannel(0x67); //6-7 differential between channels
-      // Send channel info to hardware UART (data stream)
-      DATA_SERIAL.print("CH1:");
-    }
-
-    // Add delay after channel swap to ensure ADS1256 is ready
-    delay(1);
-    
+    // Read ADC value
     val1 = read_Value();
-
-    // Send data to hardware UART, system messages to USB
-    if (val1 != -1) {
-      // Send raw ADC value and voltage to hardware UART
-      DATA_SERIAL.print(val1);
-      DATA_SERIAL.print(",");
-      myVolts = (1.0000 * val1) / voltAdjuster;
-      DATA_SERIAL.println(myVolts, 4);
+    
+    // Store in internal buffer if valid reading
+    if (val1 != -1 && bufferedSamples < BUFFER_SIZE) {
+      dataBuffer[bufferWriteIndex].channel = currentChannel;
+      dataBuffer[bufferWriteIndex].raw_value = val1;
+      dataBuffer[bufferWriteIndex].voltage = (1.0000 * val1) / voltAdjuster;
+      dataBuffer[bufferWriteIndex].timestamp = currentTime;
       
-      // Send debug info to USB Serial
-      DEBUG_SERIAL.print("Data sent to UART - Channel ");
-      DEBUG_SERIAL.print(myChannel);
-      DEBUG_SERIAL.print(": ");
-      DEBUG_SERIAL.println(val1);
-    } else {
-      DEBUG_SERIAL.println("Error: DRDY timeout");
-      // Optionally send error to hardware UART as well
-      DATA_SERIAL.println("ERROR");
+      bufferWriteIndex = (bufferWriteIndex + 1) % BUFFER_SIZE;
+      bufferedSamples++;
+      
+      // Move to next channel for next iteration
+      currentChannelIndex = (currentChannelIndex + 1) % numSelectedChannels;
     }
+  }
+  
+  // Batch transmission: Send data every 50ms
+  if (currentTime - lastTransmitTime >= TRANSMIT_INTERVAL && bufferedSamples > 0) {
+    lastTransmitTime = currentTime;
+    
+    // Send batch header
+    DATA_SERIAL.print("BATCH:");
+    DATA_SERIAL.print((uint16_t)min((uint16_t)bufferedSamples, (uint16_t)BATCH_SIZE));
+    DATA_SERIAL.println();
+    
+    // Send batch data
+    uint16_t sentCount = 0;
+    while (bufferedSamples > 0 && sentCount < BATCH_SIZE) {
+      DataPoint& point = dataBuffer[bufferReadIndex];
+      
+      DATA_SERIAL.print("CH");
+      DATA_SERIAL.print(point.channel);
+      DATA_SERIAL.print(":");
+      DATA_SERIAL.print(point.raw_value);
+      DATA_SERIAL.print(",");
+      DATA_SERIAL.print(point.voltage, 4);
+      DATA_SERIAL.print(",");
+      DATA_SERIAL.println(point.timestamp);
+      
+      bufferReadIndex = (bufferReadIndex + 1) % BUFFER_SIZE;
+      bufferedSamples--;
+      sentCount++;
+    }
+    
+    // Send batch footer
+    DATA_SERIAL.println("END_BATCH");
+    
+    // Debug info
+    DEBUG_SERIAL.print("Sent batch: ");
+    DEBUG_SERIAL.print(sentCount);
+    DEBUG_SERIAL.print(" samples, remaining: ");
+    DEBUG_SERIAL.println(bufferedSamples);
   }
 }
 
@@ -345,8 +419,6 @@ void waitforDRDY() {
     DEBUG_SERIAL.print("DRDY timeout after ");
     DEBUG_SERIAL.print(elapsed);
     DEBUG_SERIAL.println(" microseconds");
-  } else {
-    DEBUG_SERIAL.println("DRDY ready via polling");
   }
   
   // 重置中斷狀態變數（雖然我們不依賴它）
@@ -361,15 +433,12 @@ void initADS() {
 
   DEBUG_SERIAL.println("Resetting ADS1256 via RST pin...");
   digitalWrite(ADS_RST_PIN, LOW);
-  delay(10); // LOW at least 4 clock cycles of onboard clock. 100 microsecons is enough
-  digitalWrite(ADS_RST_PIN, HIGH); // now reset to deafult values
+  delay(10);
+  digitalWrite(ADS_RST_PIN, HIGH);
   delay(1000);
 
   DEBUG_SERIAL.println("Sending RESET command via SPI...");
-  //now reset the ADS
   Reset();
-
-  //let the system power up and stabilize (datasheet pg 24)
   delay(2000);
 
   DEBUG_SERIAL.print("Reading STATUS register: ");
@@ -379,7 +448,6 @@ void initADS() {
   DEBUG_SERIAL.print(status, HEX);
   DEBUG_SERIAL.println(")");
   
-  // Check if ADS1256 is responding
   if (status == 0 || status == 255) {
     DEBUG_SERIAL.println("WARNING: ADS1256 not responding properly!");
     DEBUG_SERIAL.println("Check connections:");
@@ -393,24 +461,20 @@ void initADS() {
     DEBUG_SERIAL.println("  GND  -> GND");
   }
 
-  //next set the mux register
   DEBUG_SERIAL.println("Setting MUX register...");
-  SetRegisterValue(MUX,MUX_RESET); //set the mux register
+  SetRegisterValue(MUX,MUX_RESET);
 
-  //next set the data rate - use slower rate for more stable readings
-  DEBUG_SERIAL.println("Setting DRATE register...");
-  SetRegisterValue(DRATE, DR_1000); //set to 1000 SPS instead of 30000
-  DEBUG_SERIAL.println("Data rate set to 1000 SPS");
+  // Set to maximum sample rate for best performance
+  DEBUG_SERIAL.println("Setting DRATE register to maximum (30000 SPS)...");
+  SetRegisterValue(DRATE, DR_30000); // Use maximum sample rate
+  DEBUG_SERIAL.println("Data rate set to 30000 SPS");
 
-  //let it settle
   delay(2000);
 
-  //then do calibration
   DEBUG_SERIAL.println("Performing self-calibration...");
-  SendCMD(SELFCAL); //send the calibration command
-  SendCMD(BUFEN_ON); //send the calibration command
+  SendCMD(SELFCAL);
+  SendCMD(BUFEN_ON);
 
-  //then print out the values
   delay(5);
 
   DEBUG_SERIAL.println("Reading calibration coefficients:");
@@ -697,5 +761,110 @@ void displayAllRegisters() {
   DEBUG_SERIAL.println(GetRegisterValue(FSC1));
   DEBUG_SERIAL.print("  FSC2 (0x0A): ");
   DEBUG_SERIAL.println(GetRegisterValue(FSC2));
+}
+
+void showModeSelectionMenu() {
+  DEBUG_SERIAL.println();
+  DEBUG_SERIAL.println("=== Mode Selection Menu ===");
+  DEBUG_SERIAL.println("Select input mode:");
+  DEBUG_SERIAL.println("1. Differential Input");
+  DEBUG_SERIAL.println("2. Single-Ended Input");
+  DEBUG_SERIAL.print("Enter choice (1 or 2): ");
+  DEBUG_SERIAL.flush();
+  
+  while (true) {
+    if (DEBUG_SERIAL.available() > 0) {
+      int choice = DEBUG_SERIAL.parseInt();
+      DEBUG_SERIAL.readStringUntil('\n'); // Clear buffer
+      
+      if (choice == 1) {
+        useDifferentialMode = true;
+        DEBUG_SERIAL.println("1");
+        DEBUG_SERIAL.println("Differential mode selected.");
+        selectDifferentialChannels();
+        break;
+      } else if (choice == 2) {
+        useDifferentialMode = false;
+        DEBUG_SERIAL.println("2");
+        DEBUG_SERIAL.println("Single-Ended mode selected.");
+        selectSingleEndedChannels();
+        break;
+      } else {
+        DEBUG_SERIAL.print("Invalid choice. Enter 1 or 2: ");
+        DEBUG_SERIAL.flush();
+      }
+    }
+    delay(100);
+  }
+}
+
+void selectDifferentialChannels() {
+  DEBUG_SERIAL.println();
+  DEBUG_SERIAL.println("=== Differential Channel Selection ===");
+  DEBUG_SERIAL.println("Available differential pairs:");
+  DEBUG_SERIAL.println("0: AIN0-AIN1    1: AIN1-AIN0");
+  DEBUG_SERIAL.println("2: AIN2-AIN3    3: AIN3-AIN2");
+  DEBUG_SERIAL.println("4: AIN4-AIN5    5: AIN5-AIN4");
+  DEBUG_SERIAL.println("6: AIN6-AIN7    7: AIN7-AIN6");
+  DEBUG_SERIAL.println("Enter channels (e.g., 0,6 for AIN0-AIN1 and AIN6-AIN7):");
+  DEBUG_SERIAL.print("Channels: ");
+  DEBUG_SERIAL.flush();
+  
+  while (true) {
+    if (DEBUG_SERIAL.available() > 0) {
+      String input = DEBUG_SERIAL.readStringUntil('\n');
+      DEBUG_SERIAL.println(input);
+      parseChannelSelection(input);
+      break;
+    }
+    delay(100);
+  }
+}
+
+void selectSingleEndedChannels() {
+  DEBUG_SERIAL.println();
+  DEBUG_SERIAL.println("=== Single-Ended Channel Selection ===");
+  DEBUG_SERIAL.println("Available channels: 0, 1, 2, 3, 4, 5, 6, 7");
+  DEBUG_SERIAL.println("Enter channels (e.g., 0,1,2 for AIN0, AIN1, AIN2):");
+  DEBUG_SERIAL.print("Channels: ");
+  DEBUG_SERIAL.flush();
+  
+  while (true) {
+    if (DEBUG_SERIAL.available() > 0) {
+      String input = DEBUG_SERIAL.readStringUntil('\n');
+      DEBUG_SERIAL.println(input);
+      parseChannelSelection(input);
+      break;
+    }
+    delay(100);
+  }
+}
+
+void parseChannelSelection(String input) {
+  numSelectedChannels = 0;
+  int startIndex = 0;
+  
+  for (int i = 0; i <= input.length(); i++) {
+    if (i == input.length() || input.charAt(i) == ',' || input.charAt(i) == ' ') {
+      if (i > startIndex) {
+        int channel = input.substring(startIndex, i).toInt();
+        if (useDifferentialMode && channel >= 0 && channel <= 7) {
+          selectedChannels[numSelectedChannels++] = channel;
+        } else if (!useDifferentialMode && channel >= 0 && channel <= 7) {
+          selectedChannels[numSelectedChannels++] = channel;
+        }
+      }
+      startIndex = i + 1;
+    }
+  }
+  
+  DEBUG_SERIAL.print("Selected ");
+  DEBUG_SERIAL.print(numSelectedChannels);
+  DEBUG_SERIAL.print(" channels: ");
+  for (int i = 0; i < numSelectedChannels; i++) {
+    DEBUG_SERIAL.print(selectedChannels[i]);
+    if (i < numSelectedChannels - 1) DEBUG_SERIAL.print(", ");
+  }
+  DEBUG_SERIAL.println();
 }
 
