@@ -432,15 +432,8 @@ void initADS() {
 int32_t read_Value() {
   int32_t adc_val = 0;
   
-  // Check if DRDY is ready before proceeding
-  if (DRDY_state == HIGH) {
-    waitforDRDY(); // Wait until DRDY is LOW
-  }
-  
-  // Return error if timeout occurred
-  if (DRDY_state == HIGH) {
-    return -1;
-  }
+  // 直接使用輪詢等待 DRDY，不檢查中斷狀態變數
+  waitforDRDY(); // Wait until DRDY is LOW
   
   SPI.beginTransaction(SPISettings(SPI_SPEED, MSBFIRST, SPI_MODE1));
   digitalWrite(ADS_CS_PIN, LOW);
