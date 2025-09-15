@@ -6,10 +6,16 @@ HardwareSerial myDataSerial(1);  // Use UART1
 #define DATA_SERIAL myDataSerial  // Hardware UART for ADS1256 data
 #define DEBUG_SERIAL Serial       // USB Serial for system messages
 
-//Pins defined for ESP32
+//Pins defined for ESP32-C3
 #define ADS_RST_PIN    3  //ADS1256 reset pin
-#define ADS_RDY_PIN    2  //ADS1256 data ready...INTERRUPT PIN
+#define ADS_RDY_PIN    2  //ADS1256 data ready...INTERRUPT PIN  
 #define ADS_CS_PIN     7  //ADS1256 chip select
+
+// ESP32-C3 SPI pins (for reference and debugging)
+// MOSI: GPIO 6
+// MISO: GPIO 5  
+// SCK:  GPIO 4
+// SS:   Can be any GPIO (we use GPIO 7)
 
 //Function declarations
 void initADS();
@@ -223,28 +229,37 @@ void setup() {
 
   SPI.begin();
   
-  DEBUG_SERIAL.println("SPI started. Initializing ADS1256...");
+  DEBUG_SERIAL.println("SPI started. About to initialize ADS1256...");
+  DEBUG_SERIAL.flush();
+  
+  DEBUG_SERIAL.println("Before initADS() call");
   DEBUG_SERIAL.flush();
   
   //set up the ads1256 board
   initADS();
   
-  DEBUG_SERIAL.println("ADS1256 initialization complete.");
+  DEBUG_SERIAL.println("After initADS() call - ADS1256 initialization complete.");
   DEBUG_SERIAL.flush();
   
   // Wait for user input before starting data collection
   DEBUG_SERIAL.println();
   DEBUG_SERIAL.println("=== System Ready ===");
   DEBUG_SERIAL.println("Press ENTER to start data collection...");
+  DEBUG_SERIAL.flush();
   
   // Wait for Enter key
   while (true) {
     if (DEBUG_SERIAL.available() > 0) {
       String input = DEBUG_SERIAL.readStringUntil('\n');
+      DEBUG_SERIAL.println("Enter key detected, continuing...");
+      DEBUG_SERIAL.flush();
       break; // Exit the loop when any input is received
     }
     delay(100); // Small delay to prevent excessive checking
   }
+  
+  DEBUG_SERIAL.println("About to display registers...");
+  DEBUG_SERIAL.flush();
   
   // Display all register values before starting
   displayAllRegisters();
@@ -253,10 +268,14 @@ void setup() {
   DEBUG_SERIAL.println("=== Starting Data Collection ===");
   DEBUG_SERIAL.println("Data will be sent to Hardware UART (GPIO21/20)");
   DEBUG_SERIAL.println("Format: CHx:raw_value,voltage");
+  DEBUG_SERIAL.flush();
   
   // Send startup message to data UART
   DATA_SERIAL.println("# ADS1256 Data Stream Started");
   DATA_SERIAL.println("# Format: CHx:raw_value,voltage");
+  
+  DEBUG_SERIAL.println("Setup complete - entering main loop");
+  DEBUG_SERIAL.flush();
 }
 
 void loop() {
@@ -313,43 +332,73 @@ void DRDY_Interuppt() {
 }
 
 void waitforDRDY() {
-  unsigned long timeout = micros() + 10000; // 10ms timeout
-  while (DRDY_state && micros() < timeout) {
-    // Add small delay to prevent excessive CPU usage
-    delayMicroseconds(1);
+  unsigned long timeout = micros() + 50000; // 50ms timeout
+  unsigned long startTime = micros();
+  
+  // 使用純輪詢方式，不依賴中斷
+  while (digitalRead(ADS_RDY_PIN) == HIGH && micros() < timeout) {
+    delayMicroseconds(10);
   }
   
   if (micros() >= timeout) {
-    DEBUG_SERIAL.println("Warning: DRDY timeout");
-    DRDY_state = LOW; // Force continue to prevent infinite loop
+    unsigned long elapsed = micros() - startTime;
+    DEBUG_SERIAL.print("DRDY timeout after ");
+    DEBUG_SERIAL.print(elapsed);
+    DEBUG_SERIAL.println(" microseconds");
+  } else {
+    DEBUG_SERIAL.println("DRDY ready via polling");
   }
   
+  // 重置中斷狀態變數（雖然我們不依賴它）
   noInterrupts();
   DRDY_state = HIGH;
   interrupts();
 }
 
 void initADS() {
+  DEBUG_SERIAL.println("Attaching interrupt...");
   attachInterrupt(digitalPinToInterrupt(ADS_RDY_PIN), DRDY_Interuppt, FALLING);
 
+  DEBUG_SERIAL.println("Resetting ADS1256 via RST pin...");
   digitalWrite(ADS_RST_PIN, LOW);
   delay(10); // LOW at least 4 clock cycles of onboard clock. 100 microsecons is enough
   digitalWrite(ADS_RST_PIN, HIGH); // now reset to deafult values
-
   delay(1000);
 
+  DEBUG_SERIAL.println("Sending RESET command via SPI...");
   //now reset the ADS
   Reset();
 
   //let the system power up and stabilize (datasheet pg 24)
   delay(2000);
 
-  DEBUG_SERIAL.println(GetRegisterValue(STATUS));
+  DEBUG_SERIAL.print("Reading STATUS register: ");
+  uint8_t status = GetRegisterValue(STATUS);
+  DEBUG_SERIAL.print(status);
+  DEBUG_SERIAL.print(" (0x");
+  DEBUG_SERIAL.print(status, HEX);
+  DEBUG_SERIAL.println(")");
+  
+  // Check if ADS1256 is responding
+  if (status == 0 || status == 255) {
+    DEBUG_SERIAL.println("WARNING: ADS1256 not responding properly!");
+    DEBUG_SERIAL.println("Check connections:");
+    DEBUG_SERIAL.println("  MOSI -> GPIO 6");
+    DEBUG_SERIAL.println("  MISO -> GPIO 5");
+    DEBUG_SERIAL.println("  SCK  -> GPIO 4");
+    DEBUG_SERIAL.println("  CS   -> GPIO 7");
+    DEBUG_SERIAL.println("  DRDY -> GPIO 2");
+    DEBUG_SERIAL.println("  RST  -> GPIO 3");
+    DEBUG_SERIAL.println("  VDD  -> 3.3V or 5V");
+    DEBUG_SERIAL.println("  GND  -> GND");
+  }
 
   //next set the mux register
+  DEBUG_SERIAL.println("Setting MUX register...");
   SetRegisterValue(MUX,MUX_RESET); //set the mux register
 
   //next set the data rate - use slower rate for more stable readings
+  DEBUG_SERIAL.println("Setting DRATE register...");
   SetRegisterValue(DRATE, DR_1000); //set to 1000 SPS instead of 30000
   DEBUG_SERIAL.println("Data rate set to 1000 SPS");
 
@@ -357,12 +406,14 @@ void initADS() {
   delay(2000);
 
   //then do calibration
+  DEBUG_SERIAL.println("Performing self-calibration...");
   SendCMD(SELFCAL); //send the calibration command
   SendCMD(BUFEN_ON); //send the calibration command
 
   //then print out the values
   delay(5);
 
+  DEBUG_SERIAL.println("Reading calibration coefficients:");
   DEBUG_SERIAL.print("OFC0: ");
   DEBUG_SERIAL.println(GetRegisterValue(OFC0));
   DEBUG_SERIAL.print("OFC1: ");
