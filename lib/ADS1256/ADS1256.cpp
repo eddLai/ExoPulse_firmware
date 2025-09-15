@@ -10,7 +10,11 @@
 #include "SPI.h"
 
 #if   defined(ARDUINO_ARCH_ESP32)
-SPIClass spiobject(HSPI);
+  #ifdef CONFIG_IDF_TARGET_ESP32C3
+    SPIClass spiobject(SPI); // Use default SPI for ESP32-C3
+  #else
+    SPIClass spiobject(HSPI); // Use HSPI for regular ESP32
+  #endif
 #endif
 
 ADS1256::ADS1256(float clockspdMhz, float vref, bool useResetPin) {
@@ -33,8 +37,15 @@ ADS1256::ADS1256(float clockspdMhz, float vref, bool useResetPin) {
   _reg_IO = B11110000;
 
   // Start SPI on a quarter of ADC clock speed
-  spiobject.begin();
-  spiobject.beginTransaction(SPISettings(clockspdMhz * 1000000 / 4, MSBFIRST, SPI_MODE1));
+  #ifdef CONFIG_IDF_TARGET_ESP32C3
+    // ESP32-C3 specific SPI initialization with correct pins
+    spiobject.begin(4, 5, 6, 7); // SCK=4, MISO=5, MOSI=6, SS=7
+  #else
+    // Regular ESP32 HSPI initialization
+    spiobject.begin();
+  #endif
+  // Use slower SPI speed for debugging and try SPI_MODE0
+  spiobject.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0)); // 1MHz, Mode 0
 }
 
 void ADS1256::writeRegister(unsigned char reg, unsigned char wdata) {

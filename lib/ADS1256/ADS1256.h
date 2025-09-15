@@ -17,15 +17,15 @@
 // SS : 10;
 
 #elif   defined(ARDUINO_ARCH_ESP32)
-#define pinDRDY 16
-#define pinRST  4
-#define pinCS   15
+#define pinDRDY 2
+#define pinRST  3
+#define pinCS   7
 #include <esp32-hal-spi.h>
-// Choose HSPI:
-// SCK : 14;
-// MISO : 12;
-// MOSI : 13;
-// SS : 15;
+// ESP32-C3 SPI pins:
+// SCK : 4;
+// MISO : 5;
+// MOSI : 6;
+// SS : 7;
 
 #else 
 	#warning  "Oops! Pins for your board are not defined: pinDRDY, pinRST, pinCS"
