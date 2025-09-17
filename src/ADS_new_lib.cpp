@@ -34,6 +34,7 @@ void showModeSelectionMenu();
 void selectDifferentialChannels();
 void selectSingleEndedChannels();
 void parseChannelSelection(String input);
+void testADS1256Communication();
 
 float myVolts = 1.0000;
 int32_t val1;//Holds the returned value
@@ -269,6 +270,9 @@ void setup() {
   
   //set up the ads1256 board
   initADS();
+  
+  // Run detailed communication test
+  testADS1256Communication();
   
   DEBUG_SERIAL.println("After initADS() call - ADS1256 initialization complete.");
   DEBUG_SERIAL.flush();
@@ -866,5 +870,47 @@ void parseChannelSelection(String input) {
     if (i < numSelectedChannels - 1) DEBUG_SERIAL.print(", ");
   }
   DEBUG_SERIAL.println();
+}
+
+void testADS1256Communication() {
+  DEBUG_SERIAL.println("=== ADS1256 Communication Test ===");
+  
+  // 測試多次讀取 STATUS 註冊器
+  for (int i = 0; i < 5; i++) {
+    uint8_t status = GetRegisterValue(STATUS);
+    DEBUG_SERIAL.print("STATUS read ");
+    DEBUG_SERIAL.print(i + 1);
+    DEBUG_SERIAL.print(": 0x");
+    DEBUG_SERIAL.println(status, HEX);
+    delay(100);
+  }
+  
+  // 測試讀取其他註冊器
+  uint8_t registers[] = {STATUS, MUX, ADCON, DRATE, IO};
+  const char* names[] = {"STATUS", "MUX", "ADCON", "DRATE", "IO"};
+  
+  DEBUG_SERIAL.println("All register readings:");
+  for (int i = 0; i < 5; i++) {
+    uint8_t value = GetRegisterValue(registers[i]);
+    DEBUG_SERIAL.print(names[i]);
+    DEBUG_SERIAL.print(": 0x");
+    DEBUG_SERIAL.println(value, HEX);
+  }
+  
+  // 檢查是否所有讀取都是 0xFF
+  bool allFF = true;
+  for (int i = 0; i < 5; i++) {
+    if (GetRegisterValue(registers[i]) != 0xFF) {
+      allFF = false;
+      break;
+    }
+  }
+  
+  if (allFF) {
+    DEBUG_SERIAL.println("❌ CRITICAL: All registers read as 0xFF");
+    DEBUG_SERIAL.println("❌ ADS1256 appears to be damaged or not connected");
+  } else {
+    DEBUG_SERIAL.println("✅ Some communication detected - may be salvageable");
+  }
 }
 
