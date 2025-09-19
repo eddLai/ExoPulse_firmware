@@ -188,3 +188,13 @@ void setup() {
 void loop() {
   // No continuous loop; 
 }
+
+//python3 can_test_04.py rmd --if can0 --mid 1 --command speed --dps 100
+//python3 can_test_04.py raw --if can0 --id 0x123 --data 11 22 33 44 55 66 77 81
+//python3 can_test_04.py --if can0 --mid 1 --command position --deg 360 --maxdps 500
+
+
+
+
+
+
