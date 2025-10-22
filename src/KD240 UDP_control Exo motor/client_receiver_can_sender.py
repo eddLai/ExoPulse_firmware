@@ -122,4 +122,11 @@ def main():
     receive_udp_data(args.ip, args.port, bus, args.iface)
 
 if __name__ == '__main__':
+
     main()
+
+
+#run these before running the script and remove the wire of stm from exoskeleton. 
+#sudo ip link set can0 down
+#sudo ip link set can0 type can bitrate 1000000
+#sudo ip link set can0 up
