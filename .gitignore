@@ -1,0 +1,18 @@
+# PlatformIO
+.pio/
+.vscode/
+.clang_complete
+.gcc-flags.json
+
+# macOS
+.DS_Store
+
+# Build artifacts
+*.o
+*.elf
+*.bin
+
+# Temporary files
+*~
+*.swp
+*.tmp
