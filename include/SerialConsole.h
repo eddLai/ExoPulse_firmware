@@ -21,9 +21,8 @@ public:
       char c = (char)Serial.read();
       if (c == '\r') continue;
       if (c == '\n') {
-        Serial.print(F("[DEBUG] Console received line: \""));
-        Serial.print(line_);
-        Serial.println(F("\""));
+        Serial.print(F("[RX] "));
+        Serial.println(line_);
         handleLine_(line_);
         line_ = "";
       } else {
@@ -67,10 +66,6 @@ private:
     l.trim();
     if (l.length() == 0) return;
 
-    Serial.print(F("[DEBUG] Parsing command: \""));
-    Serial.print(l);
-    Serial.println(F("\""));
-
     String cmd, a1, a2;
     int sp1 = l.indexOf(' ');
     if (sp1 < 0) {
@@ -90,15 +85,7 @@ private:
     }
     cmd.toUpperCase();
 
-    Serial.print(F("[DEBUG] Parsed - cmd: "));
-    Serial.print(cmd);
-    Serial.print(F(", arg1: "));
-    Serial.print(a1);
-    Serial.print(F(", arg2: "));
-    Serial.println(a2);
-
     if (cmd == "HELP") {
-      Serial.println(F("[DEBUG] Executing HELP command"));
       printHelp_();
       Serial.println(F("OK"));
       feedWdt_();
@@ -106,21 +93,17 @@ private:
     }
 
     if (cmd == "STOP") {
-      Serial.println(F("[DEBUG] Executing STOP command"));
       if (exo_.stop()) { Serial.println(F("OK")); feedWdt_(); }
       else Serial.println(F("ERR: stop failed"));
       return;
     }
 
     if (cmd == "STATUS") {
-      Serial.println(F("[DEBUG] Executing STATUS command"));
       if (a1.length() == 0) {
         Serial.println(F("ERR: usage STATUS <id>"));
         return;
       }
       int id = a1.toInt();
-      Serial.print(F("[DEBUG] Querying status for motor "));
-      Serial.println(id);
       auto state = exo_.getLastState(id);
       if (state.valid) {
         Serial.print(F("# Motor "));
@@ -142,75 +125,54 @@ private:
     }
 
     if (cmd == "TORQ" || cmd == "T") {
-      Serial.println(F("[DEBUG] Executing TORQ command"));
       if (a1.length() == 0 || a2.length() == 0) {
         Serial.println(F("ERR: usage TORQ <id> <Nm>"));
         return;
       }
       int id = a1.toInt();
       double nm = a2.toFloat();
-      Serial.print(F("[DEBUG] Setting torque: id="));
-      Serial.print(id);
-      Serial.print(F(", Nm="));
-      Serial.println(nm, 3);
-      if (exo_.setTorque(id, nm)) { Serial.println(F("OK")); feedWdt_(); }
+      if (exo_.setTorque(id, nm)) { Serial.println(F("OK")); feedWdt_(id); }
       else Serial.println(F("ERR: setTorque failed"));
       return;
     }
 
     if (cmd == "IQ") {
-      Serial.println(F("[DEBUG] Executing IQ command"));
       if (a1.length() == 0 || a2.length() == 0) {
         Serial.println(F("ERR: usage IQ <id> <iq>"));
         return;
       }
       int id = a1.toInt();
       int16_t iq = (int16_t)a2.toInt();
-      Serial.print(F("[DEBUG] Setting torque Iq: id="));
-      Serial.print(id);
-      Serial.print(F(", iq="));
-      Serial.println(iq);
-      if (exo_.setTorqueIq(id, iq)) { Serial.println(F("OK")); feedWdt_(); }
+      if (exo_.setTorqueIq(id, iq)) { Serial.println(F("OK")); feedWdt_(id); }
       else Serial.println(F("ERR: setTorqueIq failed"));
       return;
     }
 
     if (cmd == "SPEED" || cmd == "S") {
-      Serial.println(F("[DEBUG] Executing SPEED command"));
       if (a1.length() == 0 || a2.length() == 0) {
         Serial.println(F("ERR: usage SPEED <id> <dps>"));
         return;
       }
       int id = a1.toInt();
       float dps = a2.toFloat();
-      Serial.print(F("[DEBUG] Setting speed: id="));
-      Serial.print(id);
-      Serial.print(F(", dps="));
-      Serial.println(dps, 2);
-      if (exo_.setSpeed(id, dps)) { Serial.println(F("OK")); feedWdt_(); }
+      if (exo_.setSpeed(id, dps)) { Serial.println(F("OK")); feedWdt_(id); }
       else Serial.println(F("ERR: setSpeed failed"));
       return;
     }
 
     if (cmd == "POS" || cmd == "P") {
-      Serial.println(F("[DEBUG] Executing POS command"));
       if (a1.length() == 0 || a2.length() == 0) {
         Serial.println(F("ERR: usage POS <id> <deg>"));
         return;
       }
       int id = a1.toInt();
       float deg = a2.toFloat();
-      Serial.print(F("[DEBUG] Setting position: id="));
-      Serial.print(id);
-      Serial.print(F(", deg="));
-      Serial.println(deg, 2);
-      if (exo_.setPosition(id, deg)) { Serial.println(F("OK")); feedWdt_(); }
+      if (exo_.setPosition(id, deg)) { Serial.println(F("OK")); feedWdt_(id); }
       else Serial.println(F("ERR: setPosition failed"));
       return;
     }
 
     if (cmd == "ZERO") {
-      Serial.println(F("[DEBUG] Executing ZERO command"));
       if (a1.length() == 0) {
         Serial.println(F("ERR: usage ZERO <id|ALL>"));
         return;
@@ -218,12 +180,9 @@ private:
       a1.toUpperCase();
       bool ok = false;
       if (a1 == "ALL") {
-        Serial.println(F("[DEBUG] Zeroing all motors"));
         ok = exo_.zeroAll();
       } else {
         int id = a1.toInt();
-        Serial.print(F("[DEBUG] Zeroing motor "));
-        Serial.println(id);
         ok = exo_.zeroAngle(id);
       }
       if (ok) { Serial.println(F("OK")); feedWdt_(); }
@@ -232,16 +191,13 @@ private:
     }
 
     if (cmd == "DEBUG") {
-      Serial.println(F("[DEBUG] Executing DEBUG command"));
-      // Usage: DEBUG            -> dump recent frames
-      //        DEBUG <motorId>  -> dump frames for motor (accept 0-3 or 1-4)
       if (a1.length() == 0) {
         exo_.dumpRecentFrames(-1);
         Serial.println(F("OK"));
         return;
       }
       int jid = a1.toInt();
-      if (jid >= 1 && jid <= 4) jid = jid - 1; // accept 1-based ids
+      if (jid >= 1 && jid <= 4) jid = jid - 1;
       if (jid < 0 || jid > 3) {
         Serial.println(F("ERR: DEBUG requires motor id (0-3 or 1-4) or no arg"));
         return;
@@ -257,7 +213,7 @@ private:
     printHelp_();
   }
 
-  void feedWdt_() { lastWdtMs_ = millis(); }
+  void feedWdt_(int motorId = -1) { lastWdtMs_ = millis(); }
 
   ExoBus& exo_;
   String line_;

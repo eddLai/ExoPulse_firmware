@@ -34,20 +34,13 @@ public:
   bool begin() {
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, LOW);
-
-    notify_("[DEBUG] ExoBus::begin() - Start");
-    notify_("[DEBUG] Checking if CAN driver is already initialized...");
     
     if (can_ != nullptr) {
-      notify_("[WARN] CAN driver already exists, deleting...");
       delete can_;
       can_ = nullptr;
     }
 
 #ifdef EXOBUS_MCP2515_DEDALQQ
-    notify_("[DEBUG] Using dedalqq/esp32-mcp2515 driver");
-    notify_("[DEBUG] Initializing SPI bus configuration");
-    
     spi_bus_config_t busConfig = {};
     busConfig.miso_io_num = kSpiMiso_;
     busConfig.mosi_io_num = kSpiMosi_;
@@ -55,7 +48,6 @@ public:
     busConfig.quadwp_io_num = -1;
     busConfig.quadhd_io_num = -1;
     
-    notify_("[DEBUG] Calling spi_bus_initialize()");
     esp_err_t ret = spi_bus_initialize(HSPI_HOST, &busConfig, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
       char buf[64];
@@ -63,16 +55,13 @@ public:
       notify_(buf);
       return false;
     }
-    notify_("[DEBUG] SPI bus initialized successfully");
 
-    notify_("[DEBUG] Configuring SPI device");
     spi_device_interface_config_t devConfig = {};
     devConfig.spics_io_num = kCanCsPin_;
     devConfig.clock_speed_hz = 1 * 1000 * 1000;
     devConfig.mode = 0;
     devConfig.queue_size = 1;
     
-    notify_("[DEBUG] Calling spi_bus_add_device()");
     ret = spi_bus_add_device(HSPI_HOST, &devConfig, &spiHandle_);
     if (ret != ESP_OK) {
       char buf[64];
@@ -80,33 +69,21 @@ public:
       notify_(buf);
       return false;
     }
-    notify_("[DEBUG] SPI device added successfully");
 
-    notify_("[DEBUG] Creating MCP2515 object");
     can_ = new CanDriver(&spiHandle_);
-    notify_("[DEBUG] MCP2515 object created");
 #else
-    notify_("[DEBUG] Using coryjfowler/mcp_can driver");
-    
-    char buf[64];
-    snprintf(buf, sizeof(buf), "[DEBUG] CS Pin: %d", kCanCsPin_);
-    notify_(buf);
-    
-    notify_("[DEBUG] Creating MCP_CAN object");
     try {
       can_ = new CanDriver(kCanCsPin_);
       if (can_ == nullptr) {
         notify_("[ERROR] Failed to allocate MCP_CAN object (nullptr)");
         return false;
       }
-      notify_("[DEBUG] MCP_CAN object created successfully");
     } catch (...) {
       notify_("[ERROR] Exception during MCP_CAN object creation");
       return false;
     }
 #endif
 
-    notify_("[DEBUG] Calling canInit()");
     if (!canInit()) {
       notify_("[ERROR] CAN init failed");
       notify_("[ERROR] Possible causes:");
@@ -117,18 +94,16 @@ public:
       notify_("[ERROR]   5. Power supply issue");
       return false;
     }
-    notify_("[DEBUG] ExoBus initialization complete");
+    notify_("[OK] ExoBus initialized");
     return true;
   }
 
   void poll() {
     if (!canReady_) {
-      notify_("[WARN] poll() called but CAN not ready");
       return;
     }
     uint32_t now = millis();
     if (now - lastReqMs_ >= kStatePeriodMs_) {
-      notify_("[DEBUG] poll() - Requesting state");
       requestState_();
       lastReqMs_ = now;
     }
@@ -136,39 +111,22 @@ public:
   }
 
   bool setTorque(int jointId, double torqueNm) {
-    notify_("[DEBUG] setTorque() called");
-    char buf[64];
-    snprintf(buf, sizeof(buf), "[DEBUG] jointId=%d, torqueNm=%.3f", jointId, torqueNm);
-    notify_(buf);
-    
     const double kNmMax = 30.0;
     if (!isfinite(torqueNm)) {
       notify_("[ERROR] torqueNm is not finite");
       return false;
     }
-    if (torqueNm > kNmMax) {
-      snprintf(buf, sizeof(buf), "[WARN] Torque clamped: %.3f -> %.3f", torqueNm, kNmMax);
-      notify_(buf);
-      torqueNm = kNmMax;
-    }
-    if (torqueNm < -kNmMax) {
-      snprintf(buf, sizeof(buf), "[WARN] Torque clamped: %.3f -> %.3f", torqueNm, -kNmMax);
-      notify_(buf);
-      torqueNm = -kNmMax;
-    }
+    if (torqueNm > kNmMax) torqueNm = kNmMax;
+    if (torqueNm < -kNmMax) torqueNm = -kNmMax;
     
     int16_t iq = (int16_t)round(torqueNm * kNmToIq_);
-    snprintf(buf, sizeof(buf), "[DEBUG] Converted to iq=%d", iq);
-    notify_(buf);
     
     uint8_t d[8] = {0xA1,0,0,0,0,0,0,0};
     d[4] = iq & 0xFF;
     d[5] = (iq >> 8) & 0xFF;
     
-    notify_("[DEBUG] Calling canSend()");
     bool ok = canSend(motorBaseId_(jointId), d, 8);
     if (ok) {
-      notify_("[DEBUG] setTorque() successful");
       logTx("TORQ", jointId, torqueNm);
     } else {
       notify_("[ERROR] setTorque() failed");
@@ -177,29 +135,17 @@ public:
   }
 
   bool setTorqueIq(int jointId, int16_t iq) {
-    notify_("[DEBUG] setTorqueIq() called");
-    char buf[64];
-    snprintf(buf, sizeof(buf), "[DEBUG] jointId=%d, iq=%d", jointId, iq);
-    notify_(buf);
-    
     const int16_t kMaxAbsIq = 300;
     int16_t orig = iq;
     if (iq >  kMaxAbsIq) iq =  kMaxAbsIq;
     if (iq < -kMaxAbsIq) iq = -kMaxAbsIq;
     
-    if (orig != iq) {
-      snprintf(buf, sizeof(buf), "[WARN] Iq clamped: %d -> %d", orig, iq);
-      notify_(buf);
-    }
-    
     uint8_t d[8] = {0xA1,0,0,0,0,0,0,0};
     d[4] = (uint8_t)(iq & 0xFF);
     d[5] = (uint8_t)((iq >> 8) & 0xFF);
     
-    notify_("[DEBUG] Calling canSend()");
     bool ok = canSend(motorBaseId_(jointId), d, 8);
     if (ok) {
-      notify_("[DEBUG] setTorqueIq() successful");
       logTx("TORQ_IQ", jointId, (double)iq);
     } else {
       notify_("[ERROR] setTorqueIq() failed");
@@ -208,28 +154,15 @@ public:
   }
 
   bool setSpeed(int jointId, float speedDps) {
-    notify_("[DEBUG] setSpeed() called");
-    char buf[64];
-    snprintf(buf, sizeof(buf), "[DEBUG] jointId=%d, speedDps=%.2f", jointId, speedDps);
-    notify_(buf);
-    
     const float kMaxAbsSpeed = 50.0f;
     if (!isfinite(speedDps)) {
       notify_("[ERROR] speedDps is not finite");
       return false;
     }
-    float orig = speedDps;
     if (speedDps >  kMaxAbsSpeed) speedDps =  kMaxAbsSpeed;
     if (speedDps < -kMaxAbsSpeed) speedDps = -kMaxAbsSpeed;
     
-    if (orig != speedDps) {
-      snprintf(buf, sizeof(buf), "[WARN] Speed clamped: %.2f -> %.2f dps", orig, speedDps);
-      notify_(buf);
-    }
-    
     int32_t sp = (int32_t)(speedDps * 100.0f);
-    snprintf(buf, sizeof(buf), "[DEBUG] Converted to raw speed=%ld", sp);
-    notify_(buf);
     
     uint8_t d[8] = {0xA2,0,0,0,0,0,0,0};
     d[4] = (uint8_t)(sp & 0xFF);
@@ -237,10 +170,8 @@ public:
     d[6] = (uint8_t)((sp >> 16) & 0xFF);
     d[7] = (uint8_t)((sp >> 24) & 0xFF);
     
-    notify_("[DEBUG] Calling canSend()");
     bool ok = canSend(motorBaseId_(jointId), d, 8);
     if (ok) {
-      notify_("[DEBUG] setSpeed() successful");
       logTx("SPEED", jointId, speedDps);
     } else {
       notify_("[ERROR] setSpeed() failed");
@@ -249,19 +180,12 @@ public:
   }
 
   bool setPosition(int jointId, float angleDeg) {
-    notify_("[DEBUG] setPosition() called");
-    char buf[64];
-    snprintf(buf, sizeof(buf), "[DEBUG] jointId=%d, angleDeg=%.2f", jointId, angleDeg);
-    notify_(buf);
-    
     if (!isfinite(angleDeg)) {
       notify_("[ERROR] angleDeg is not finite");
       return false;
     }
     
     int32_t p = (int32_t)(angleDeg * 100.0f);
-    snprintf(buf, sizeof(buf), "[DEBUG] Converted to raw position=%ld", p);
-    notify_(buf);
     
     uint8_t d[8] = {0xA3,0,0,0,0,0,0,0};
     d[4] = (uint8_t)(p & 0xFF);
@@ -269,10 +193,8 @@ public:
     d[6] = (uint8_t)((p >> 16) & 0xFF);
     d[7] = (uint8_t)((p >> 24) & 0xFF);
     
-    notify_("[DEBUG] Calling canSend()");
     bool ok = canSend(motorBaseId_(jointId), d, 8);
     if (ok) {
-      notify_("[DEBUG] setPosition() successful");
       logTx("POS", jointId, (double)angleDeg);
     } else {
       notify_("[ERROR] setPosition() failed");
@@ -281,15 +203,9 @@ public:
   }
 
   bool stop() {
-    notify_("[DEBUG] stop() called");
     int jointId = 0;
     uint8_t d[8] = {0xA1,0,0,0,0,0,0,0};
     bool ok = canReady_ ? canSend(motorBaseId_(jointId), d, 8) : true;
-    if (ok) {
-      notify_("[DEBUG] stop() successful");
-    } else {
-      notify_("[ERROR] stop() failed");
-    }
     logTx("STOP", -1, 0);
     safeBlink(2, 60, 60);
     return ok;
@@ -302,25 +218,14 @@ public:
   }
 
   bool zeroAngle(int jointId) {
-    notify_("[DEBUG] zeroAngle() called");
-    char buf[64];
-    snprintf(buf, sizeof(buf), "[DEBUG] jointId=%d", jointId);
-    notify_(buf);
-    
     uint8_t d[8] = {0x19,0,0,0,0,0,0,0};
     bool ok = canReady_ ? canSend(motorBaseId_(jointId), d, 8) : true;
-    if (ok) {
-      notify_("[DEBUG] zeroAngle() successful");
-    } else {
-      notify_("[ERROR] zeroAngle() failed");
-    }
     logTx("ZERO", jointId, 0);
     safeBlink(1);
     return ok;
   }
 
   bool zeroAll() {
-    notify_("[DEBUG] zeroAll() called");
     bool ok = zeroAngle(0);
     logTx("ZERO_ALL", -1, 0);
     safeBlink(2);
@@ -410,102 +315,46 @@ private:
   }
 
   bool canInit() {
-    notify_("[DEBUG] canInit() - Start");
-    
     if (can_ == nullptr) {
       notify_("[ERROR] CAN driver is nullptr!");
       return false;
     }
     
 #ifdef EXOBUS_MCP2515_DEDALQQ
-    notify_("[DEBUG] Resetting MCP2515...");
     can_->reset();
-    notify_("[DEBUG] Reset complete");
-    
-    notify_("[DEBUG] Setting bitrate 1Mbps@8MHz...");
     auto err = can_->setBitrate(CAN_1000KBPS, MCP_8MHZ);
     if (err != MCP2515::ERROR_OK) {
-      char buf[64];
-      snprintf(buf, sizeof(buf), "[WARN] 1Mbps failed (err=%d), trying 500kbps...", (int)err);
-      notify_(buf);
       err = can_->setBitrate(CAN_500KBPS, MCP_8MHZ);
       if (err != MCP2515::ERROR_OK) {
-        snprintf(buf, sizeof(buf), "[ERROR] Bitrate config failed (err=%d)", (int)err);
-        notify_(buf);
+        notify_("[ERROR] Bitrate config failed");
         return false;
       }
-      notify_("[DEBUG] Bitrate set to 500kbps");
-    } else {
-      notify_("[DEBUG] Bitrate set to 1Mbps");
     }
-    
-    notify_("[DEBUG] Setting NORMAL mode...");
     can_->setNormalMode();
-    notify_("[DEBUG] MCP2515 in NORMAL mode");
 #else
-    notify_("[DEBUG] Initializing MCP_CAN...");
-    notify_("[DEBUG] Attempting: MCP_STDEXT, CAN_1000KBPS, MCP_8MHZ");
-    
     byte result = can_->begin(MCP_STDEXT, CAN_1000KBPS, MCP_8MHZ);
     
-    char buf[64];
-    snprintf(buf, sizeof(buf), "[DEBUG] MCP_CAN::begin() returned: %d", result);
-    notify_(buf);
-    
     if (result != CAN_OK) {
-      notify_("[ERROR] MCP_CAN begin failed");
-      notify_("[DEBUG] Trying alternative configurations...");
-      
-      // 嘗試 16MHz 晶振
-      notify_("[DEBUG] Trying: CAN_1000KBPS @ MCP_16MHZ");
       result = can_->begin(MCP_STDEXT, CAN_1000KBPS, MCP_16MHZ);
-      snprintf(buf, sizeof(buf), "[DEBUG] Result: %d", result);
-      notify_(buf);
-      
       if (result != CAN_OK) {
-        // 嘗試 500kbps @ 8MHz
-        notify_("[DEBUG] Trying: CAN_500KBPS @ MCP_8MHZ");
         result = can_->begin(MCP_STDEXT, CAN_500KBPS, MCP_8MHZ);
-        snprintf(buf, sizeof(buf), "[DEBUG] Result: %d", result);
-        notify_(buf);
-        
         if (result != CAN_OK) {
-          // 嘗試 500kbps @ 16MHz
-          notify_("[DEBUG] Trying: CAN_500KBPS @ MCP_16MHZ");
           result = can_->begin(MCP_STDEXT, CAN_500KBPS, MCP_16MHZ);
-          snprintf(buf, sizeof(buf), "[DEBUG] Result: %d", result);
-          notify_(buf);
-          
           if (result != CAN_OK) {
             notify_("[ERROR] All MCP_CAN configuration attempts failed");
             notify_("[ERROR] Please check hardware connections");
             return false;
           }
-          notify_("[DEBUG] Success with CAN_500KBPS @ MCP_16MHZ");
-        } else {
-          notify_("[DEBUG] Success with CAN_500KBPS @ MCP_8MHZ");
         }
-      } else {
-        notify_("[DEBUG] Success with CAN_1000KBPS @ MCP_16MHZ");
       }
-    } else {
-      notify_("[DEBUG] MCP_CAN begin successful with initial config");
     }
-    
-    notify_("[DEBUG] Setting NORMAL mode...");
     can_->setMode(MCP_NORMAL);
-    notify_("[DEBUG] MCP_CAN in NORMAL mode");
 #endif
     canReady_ = true;
-    notify_("[DEBUG] canInit() - Complete");
     return true;
   }
 
   bool canSend(uint32_t id, const uint8_t* data, size_t len) {
-    char buf[128];
-    snprintf(buf, sizeof(buf), "[DEBUG] canSend() - ID=0x%03lX, len=%d", id, len);
-    notify_(buf);
-    
     if (!canReady_ || !can_) {
       notify_("[ERROR] CAN not ready for send");
       return false;
@@ -515,41 +364,29 @@ private:
       return false;
     }
     
-    // 顯示要發送的資料
-    snprintf(buf, sizeof(buf), "[DEBUG] Data: %02X %02X %02X %02X %02X %02X %02X %02X",
-             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
-    notify_(buf);
-    
 #ifdef EXOBUS_MCP2515_DEDALQQ
     struct can_frame f;
     f.can_id  = id;
     f.can_dlc = (uint8_t)len;
     for (uint8_t i = 0; i < len; ++i) f.data[i] = data[i];
     
-    notify_("[DEBUG] Calling MCP2515::sendMessage()");
     auto err = can_->sendMessage(&f);
     if (err != MCP2515::ERROR_OK) {
-      snprintf(buf, sizeof(buf), "[ERROR] CAN send error: %d", (int)err);
-      notify_(buf);
+      notify_("[ERROR] CAN send error");
       return false;
     }
-    notify_("[DEBUG] CAN send successful");
     return true;
 #else
-    notify_("[DEBUG] Calling MCP_CAN::sendMsgBuf()");
     byte rc = can_->sendMsgBuf(id, 0, (byte)len, (uint8_t*)data);
     if (rc != CAN_OK) {
-      snprintf(buf, sizeof(buf), "[ERROR] CAN send error: %d", (int)rc);
-      notify_(buf);
+      notify_("[ERROR] CAN send error");
       return false;
     }
-    notify_("[DEBUG] CAN send successful");
     return true;
 #endif
   }
 
   void requestState_() {
-    notify_("[DEBUG] requestState_() - Sending state request");
     uint8_t d[8] = {0x9C,0,0,0,0,0,0,0};
     canSend(motorBaseId_(0), d, 8);
   }
@@ -559,19 +396,15 @@ private:
 #ifdef EXOBUS_MCP2515_DEDALQQ
     struct can_frame f;
     while (can_->readMessage(&f) == MCP2515::ERROR_OK) {
-      notify_("[DEBUG] processRx_() - Message received");
-      // store recent frame for debug
       logRecentFrame_(f.can_id, f.can_dlc, f.data);
       parseStateFrame_(f.can_id, f.can_dlc, f.data);
     }
 #else
     while (can_->checkReceive() == CAN_MSGAVAIL) {
-      notify_("[DEBUG] processRx_() - Message available");
       unsigned long rxId;
       byte len;
       uint8_t buf[8];
       can_->readMsgBuf(&rxId, &len, buf);
-      // store recent frame for debug
       logRecentFrame_(rxId, len, buf);
       parseStateFrame_(rxId, len, buf);
     }
@@ -579,18 +412,10 @@ private:
   }
 
   void parseStateFrame_(uint32_t rxId, uint8_t len, const uint8_t* buf) {
-    char dbg[128];
-    snprintf(dbg, sizeof(dbg), "[DEBUG] parseStateFrame_() - ID=0x%03lX, len=%d, cmd=0x%02X", 
-             rxId, len, buf[0]);
-    notify_(dbg);
-    
     if (len == 8 && buf[0] == 0x9C && rxId >= 0x140 && rxId < 0x160) {
       int jointId = (int)(rxId - 0x140);
-      snprintf(dbg, sizeof(dbg), "[DEBUG] Valid state frame for joint %d", jointId);
-      notify_(dbg);
       
       if (jointId < 0 || jointId >= 4) {
-        notify_("[WARN] Joint ID out of range");
         return;
       }
       
@@ -616,8 +441,6 @@ private:
                "[RX] J=%d ang=%.2f sp=%.1f iq=%.3f T=%d",
                jointId, angle_deg, speed_dps, iq_A, temperature);
       notify_(buf2);
-    } else {
-      notify_("[DEBUG] Frame does not match state frame criteria");
     }
   }
 
