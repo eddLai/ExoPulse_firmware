@@ -4,6 +4,10 @@
 .clang_complete
 .gcc-flags.json
 
+# Python virtual environment
+.venv/
+venv/
+
 # macOS
 .DS_Store
 

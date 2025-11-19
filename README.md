@@ -31,7 +31,7 @@ ESP32-based CAN bus control system for exoskeleton motor control using MCP2515.
 
 ```bash
 platformio run --target upload
-platformio device monitor --baud 230400
+platformio device monitor --baud 115200
 ```
 
 ## Serial Commands

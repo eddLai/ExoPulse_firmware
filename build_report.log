@@ -1,0 +1,7 @@
+Build started at: Wed Nov 19 21:53:40 CST 2025
+Project: ExoPulse Firmware
+Branch: bugfix/main-source-and-testing
+Commit: e0d6939
+
+[INFO] Checking project structure...
+[PASS] Main source file exists (src/main.cpp)

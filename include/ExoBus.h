@@ -319,8 +319,9 @@ private:
       notify_("[ERROR] CAN driver is nullptr!");
       return false;
     }
-    
+
 #ifdef EXOBUS_MCP2515_DEDALQQ
+    notify_("[INFO] Using DEDALQQ MCP2515 driver");
     can_->reset();
     auto err = can_->setBitrate(CAN_1000KBPS, MCP_8MHZ);
     if (err != MCP2515::ERROR_OK) {
@@ -332,6 +333,7 @@ private:
     }
     can_->setNormalMode();
 #else
+    notify_("[INFO] Using coryjfowler MCP_CAN driver");
     byte result = can_->begin(MCP_STDEXT, CAN_1000KBPS, MCP_8MHZ);
     
     if (result != CAN_OK) {
@@ -369,26 +371,64 @@ private:
     f.can_id  = id;
     f.can_dlc = (uint8_t)len;
     for (uint8_t i = 0; i < len; ++i) f.data[i] = data[i];
-    
+
     auto err = can_->sendMessage(&f);
     if (err != MCP2515::ERROR_OK) {
-      notify_("[ERROR] CAN send error");
+      // 添加詳細的錯誤診斷
+      char buf[80];
+      snprintf(buf, sizeof(buf), "[ERROR] CAN send failed: err=%d, id=0x%03lX, len=%d", (int)err, (unsigned long)id, len);
+      notify_(buf);
+
+      if (txErrorCount_++ < 5) {
+        notify_("[HINT] Check: 1) CAN termination (120Ω), 2) Motor power ON, 3) CAN_H/L wiring");
+      }
       return false;
     }
+    txErrorCount_ = 0;
     return true;
 #else
     byte rc = can_->sendMsgBuf(id, 0, (byte)len, (uint8_t*)data);
     if (rc != CAN_OK) {
-      notify_("[ERROR] CAN send error");
+      // 添加詳細的錯誤診斷
+      char buf[80];
+      snprintf(buf, sizeof(buf), "[ERROR] CAN send failed: rc=%d, id=0x%03lX, len=%d", rc, (unsigned long)id, len);
+      notify_(buf);
+
+      // 檢查 MCP2515 錯誤標誌
+      if (txErrorCount_++ < 5) {  // 只顯示前5次的詳細診斷
+        byte txErr = can_->errorCountTX();
+        byte rxErr = can_->errorCountRX();
+        snprintf(buf, sizeof(buf), "[DEBUG] MCP2515 TXErr=%d, RXErr=%d", txErr, rxErr);
+        notify_(buf);
+        notify_("[HINT] Check: 1) CAN termination (120Ω), 2) Motor power, 3) CAN_H/L wiring");
+      }
       return false;
     }
+    txErrorCount_ = 0;  // 成功後重置計數器
     return true;
 #endif
   }
 
   void requestState_() {
     uint8_t d[8] = {0x9C,0,0,0,0,0,0,0};
-    canSend(motorBaseId_(0), d, 8);
+    // 掃描 Motor ID 0-3 的狀態（用於診斷實際 ID）
+    static bool scanMode = true;
+    static uint8_t scanCount = 0;
+
+    if (scanMode && scanCount < 20) {  // 前 20 次掃描所有 ID
+      for (int id = 0; id <= 3; id++) {
+        canSend(motorBaseId_(id), d, 8);
+      }
+      scanCount++;
+      if (scanCount >= 20) {
+        scanMode = false;
+        notify_("[INFO] Scan complete. Switching to ID 1,2 only.");
+      }
+    } else {
+      // 之後只請求 ID 1 和 2
+      canSend(motorBaseId_(1), d, 8);
+      canSend(motorBaseId_(2), d, 8);
+    }
   }
 
   void processRx_() {
@@ -456,7 +496,8 @@ private:
 
   bool canReady_ = false;
   uint32_t lastReqMs_ = 0;
-  static constexpr uint32_t kStatePeriodMs_ = 1000;
+  uint32_t txErrorCount_ = 0;  // 發送錯誤計數器（用於診斷）
+  static constexpr uint32_t kStatePeriodMs_ = 50;  // 50ms 更新頻率（參考 test0.txt）
   static constexpr int kCanCsPin_ = 5;
   static constexpr float kNmToIq_ = 20.0f;
   static constexpr int kSpiSck_  = 18;
