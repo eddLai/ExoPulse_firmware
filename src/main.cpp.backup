@@ -54,7 +54,6 @@ struct MotorStatus {
     uint8_t errorState;      // Error flags
     int16_t torqueCurrent;   // iq: -2048~2048 → -33A~33A
     int16_t speed;           // dps (degrees per second)
-    int16_t acceleration;    // dps/s (degrees per second squared)
     uint16_t encoder;        // 0~16383 (14-bit)
     int64_t motorAngle;      // 0.01°/LSB (multi-turn cumulative)
     uint32_t timestamp;      // millis() when read
@@ -163,41 +162,6 @@ bool readMultiTurnAngle(uint32_t canID, MotorStatus& status) {
     return true;
 }
 
-// Read acceleration
-bool readAcceleration(uint32_t canID, MotorStatus& status) {
-    if (!sendReadCommand(canID, READ_ACCELERATION)) {
-        return false;
-    }
-
-    uint8_t rxData[8];
-    if (!readMotorResponse(canID, READ_ACCELERATION, rxData, 50)) {
-        return false;
-    }
-
-    // Acceleration is int32_t, unit: 1dps/s
-    int32_t accel = (int32_t)(rxData[4] | (rxData[5] << 8) | (rxData[6] << 16) | (rxData[7] << 24));
-    status.acceleration = (int16_t)(accel);  // Truncate to int16_t for compact storage
-
-    return true;
-}
-
-// Clear motor angle (reset current position to zero) - Command 0x95
-bool clearMotorAngle(uint32_t canID) {
-    uint8_t txData[8] = {0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-
-    if (xSemaphoreTake(canMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        byte rc = CAN.sendMsgBuf(canID, 0, 8, txData);
-        xSemaphoreGive(canMutex);
-
-        if (rc == CAN_OK) {
-            // Wait for response confirmation
-            uint8_t rxData[8];
-            return readMotorResponse(canID, 0x95, rxData, 100);
-        }
-    }
-    return false;
-}
-
 // Read complete status for one motor
 bool readMotorComplete(uint8_t motorID, uint32_t canID, MotorStatus& status) {
     status.motorID = motorID;
@@ -213,10 +177,6 @@ bool readMotorComplete(uint8_t motorID, uint32_t canID, MotorStatus& status) {
     }
 
     if (!readMultiTurnAngle(canID, status)) {
-        success = false;
-    }
-
-    if (!readAcceleration(canID, status)) {
         success = false;
     }
 
@@ -260,49 +220,6 @@ void serialOutputTask(void *parameter) {
     uint32_t outputCount2 = 0;
 
     while (true) {
-        // Check for serial commands (non-blocking)
-        if (Serial.available() > 0) {
-            String cmd = Serial.readStringUntil('\n');
-            cmd.trim();
-
-            if (cmd == "RESET_M1" || cmd == "RESET1") {
-                Serial.println("[CMD] Resetting Motor 1 angle to zero...");
-                if (clearMotorAngle(CAN_ID_1)) {
-                    Serial.println("[OK] Motor 1 angle reset successful!");
-                } else {
-                    Serial.println("[ERROR] Motor 1 angle reset failed!");
-                }
-            }
-            else if (cmd == "RESET_M2" || cmd == "RESET2") {
-                Serial.println("[CMD] Resetting Motor 2 angle to zero...");
-                if (clearMotorAngle(CAN_ID_2)) {
-                    Serial.println("[OK] Motor 2 angle reset successful!");
-                } else {
-                    Serial.println("[ERROR] Motor 2 angle reset failed!");
-                }
-            }
-            else if (cmd == "RESET_ALL" || cmd == "RESET") {
-                Serial.println("[CMD] Resetting ALL motor angles to zero...");
-                bool m1_ok = clearMotorAngle(CAN_ID_1);
-                vTaskDelay(pdMS_TO_TICKS(50));
-                bool m2_ok = clearMotorAngle(CAN_ID_2);
-
-                if (m1_ok && m2_ok) {
-                    Serial.println("[OK] All motor angles reset successful!");
-                } else {
-                    Serial.println("[ERROR] Some motor resets failed!");
-                }
-            }
-            else if (cmd == "HELP") {
-                Serial.println("\n=== Available Commands ===");
-                Serial.println("RESET_M1 or RESET1  - Reset Motor 1 angle to zero");
-                Serial.println("RESET_M2 or RESET2  - Reset Motor 2 angle to zero");
-                Serial.println("RESET_ALL or RESET  - Reset both motors");
-                Serial.println("HELP                - Show this help");
-                Serial.println("========================\n");
-            }
-        }
-
         // Wait for data from queue (blocking with timeout)
         if (xQueueReceive(motorDataQueue, &status, pdMS_TO_TICKS(200)) == pdTRUE) {
             // Output in compact format for GUI parsing
@@ -319,8 +236,6 @@ void serialOutputTask(void *parameter) {
             Serial.print(actualCurrent, 2);
             Serial.print(" S:");
             Serial.print(status.speed);
-            Serial.print(" ACC:");
-            Serial.print(status.acceleration);
             Serial.print(" E:");
             Serial.print(status.encoder);
             Serial.print(" A:");
@@ -360,10 +275,6 @@ void serialOutputTask(void *parameter) {
                 Serial.print("Speed:           ");
                 Serial.print(status.speed);
                 Serial.println(" dps");
-
-                Serial.print("Acceleration:    ");
-                Serial.print(status.acceleration);
-                Serial.println(" dps/s");
 
                 Serial.print("Encoder:         ");
                 Serial.print(status.encoder);

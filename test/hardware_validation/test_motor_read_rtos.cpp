@@ -7,12 +7,19 @@
 #include "freertos/semphr.h"
 
 /*
- * LK-TECH Dual Motor Status Reader - FreeRTOS Optimized
- * Purpose: READ TWO motors (ID 1 and ID 2) status data with high-frequency updates
+ * LK-TECH Motor Status Reader - FreeRTOS Optimized
+ * Purpose: READ motor status data with high-frequency updates using FreeRTOS
+ *
+ * Performance improvements:
+ * - Dedicated CAN reading task (high priority)
+ * - Dedicated Serial output task (lower priority)
+ * - Queue-based communication between tasks
+ * - Non-blocking operations
+ * - 10Hz update rate (100ms interval) - much faster than 1Hz
  *
  * Motor: LK-TECH M Series (MS/MF/MG/MH)
  * CAN Baud Rate: 1 Mbps
- * Motor IDs: 1 and 2
+ * Motor ID: 1 (configurable)
  */
 
 // MCP2515 SPI Configuration
@@ -24,39 +31,42 @@ constexpr int SPI_MOSI = 23;
 MCP_CAN CAN(CAN_CS);
 
 constexpr int LED_PIN = 2;
-constexpr uint8_t MOTOR_ID_1 = 1;  // First motor ID
-constexpr uint8_t MOTOR_ID_2 = 2;  // Second motor ID
+constexpr uint8_t MOTOR_ID = 1;  // Motor ID (1-32)
 
 // CAN IDs (0x140 + Motor ID)
-const uint32_t CAN_ID_1 = 0x140 + MOTOR_ID_1;
-const uint32_t CAN_ID_2 = 0x140 + MOTOR_ID_2;
+const uint32_t CAN_ID = 0x140 + MOTOR_ID;
 
 // Update rate configuration
-constexpr uint32_t UPDATE_INTERVAL_MS = 100;  // 10Hz update rate
+constexpr uint32_t UPDATE_INTERVAL_MS = 100;  // 10Hz update rate (was 1000ms = 1Hz)
 
 // Read-only commands (no motor control)
 enum MotorReadCommand : uint8_t {
-    READ_PID_PARAMS         = 0x30,
-    READ_ACCELERATION       = 0x33,
-    READ_ENCODER            = 0x90,
-    READ_MULTI_ANGLE        = 0x92,
-    READ_SINGLE_ANGLE       = 0x94,
-    READ_STATUS_1_ERROR     = 0x9A,
-    READ_STATUS_2           = 0x9C,
-    READ_STATUS_3           = 0x9D,
+    READ_PID_PARAMS         = 0x30,  // Read PID parameters
+    READ_ACCELERATION       = 0x33,  // Read acceleration
+    READ_ENCODER            = 0x90,  // Read encoder data
+    READ_MULTI_ANGLE        = 0x92,  // Read multi-turn angle
+    READ_SINGLE_ANGLE       = 0x94,  // Read single-turn angle
+    READ_STATUS_1_ERROR     = 0x9A,  // Read status 1 and error flags
+    READ_STATUS_2           = 0x9C,  // Read status 2 (temp, torque, speed, encoder)
+    READ_STATUS_3           = 0x9D,  // Read status 3 (temp, phase currents)
 };
 
 // Motor status data structure
 struct MotorStatus {
-    uint8_t motorID;         // Motor ID (1 or 2)
+    // Status 1
     int8_t temperature;      // °C
     uint16_t voltage;        // 0.1V/LSB
     uint8_t errorState;      // Error flags
+
+    // Status 2
     int16_t torqueCurrent;   // iq: -2048~2048 → -33A~33A
     int16_t speed;           // dps (degrees per second)
-    int16_t acceleration;    // dps/s (degrees per second squared)
     uint16_t encoder;        // 0~16383 (14-bit)
+
+    // Multi-turn angle
     int64_t motorAngle;      // 0.01°/LSB (multi-turn cumulative)
+
+    // Timestamp
     uint32_t timestamp;      // millis() when read
 };
 
@@ -66,12 +76,16 @@ SemaphoreHandle_t canMutex;
 TaskHandle_t canReadTaskHandle;
 TaskHandle_t serialOutputTaskHandle;
 
-// Send a read command to specific motor
-bool sendReadCommand(uint32_t canID, uint8_t cmd) {
+// Buffer for latest motor status
+volatile MotorStatus latestStatus = {0};
+volatile bool dataReady = false;
+
+// Send a read command to motor
+bool sendReadCommand(uint8_t cmd) {
     uint8_t txData[8] = {cmd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
     if (xSemaphoreTake(canMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        byte rc = CAN.sendMsgBuf(canID, 0, 8, txData);
+        byte rc = CAN.sendMsgBuf(CAN_ID, 0, 8, txData);
         xSemaphoreGive(canMutex);
         return (rc == CAN_OK);
     }
@@ -79,7 +93,7 @@ bool sendReadCommand(uint32_t canID, uint8_t cmd) {
 }
 
 // Read CAN response from motor (non-blocking)
-bool readMotorResponse(uint32_t expectedID, uint8_t expectedCmd, uint8_t* rxData, uint32_t timeoutMs = 50) {
+bool readMotorResponse(uint8_t expectedCmd, uint8_t* rxData, uint32_t timeoutMs = 50) {
     uint32_t startTime = millis();
 
     while (millis() - startTime < timeoutMs) {
@@ -92,7 +106,7 @@ bool readMotorResponse(uint32_t expectedID, uint8_t expectedCmd, uint8_t* rxData
                 xSemaphoreGive(canMutex);
 
                 // Check if response is from our motor
-                if (rxId == expectedID && rxData[0] == expectedCmd) {
+                if (rxId == CAN_ID && rxData[0] == expectedCmd) {
                     return true;
                 }
             } else {
@@ -106,16 +120,17 @@ bool readMotorResponse(uint32_t expectedID, uint8_t expectedCmd, uint8_t* rxData
 }
 
 // Read motor status 2 (temperature, torque current, speed, encoder)
-bool readMotorStatus2(uint32_t canID, MotorStatus& status) {
-    if (!sendReadCommand(canID, READ_STATUS_2)) {
+bool readMotorStatus2(MotorStatus& status) {
+    if (!sendReadCommand(READ_STATUS_2)) {
         return false;
     }
 
     uint8_t rxData[8];
-    if (!readMotorResponse(canID, READ_STATUS_2, rxData, 50)) {
+    if (!readMotorResponse(READ_STATUS_2, rxData, 50)) {
         return false;
     }
 
+    // Parse response
     status.temperature = (int8_t)rxData[1];
     status.torqueCurrent = (int16_t)(rxData[2] | (rxData[3] << 8));
     status.speed = (int16_t)(rxData[4] | (rxData[5] << 8));
@@ -125,16 +140,17 @@ bool readMotorStatus2(uint32_t canID, MotorStatus& status) {
 }
 
 // Read motor status 1 (temperature, voltage, error flags)
-bool readMotorStatus1(uint32_t canID, MotorStatus& status) {
-    if (!sendReadCommand(canID, READ_STATUS_1_ERROR)) {
+bool readMotorStatus1(MotorStatus& status) {
+    if (!sendReadCommand(READ_STATUS_1_ERROR)) {
         return false;
     }
 
     uint8_t rxData[8];
-    if (!readMotorResponse(canID, READ_STATUS_1_ERROR, rxData, 50)) {
+    if (!readMotorResponse(READ_STATUS_1_ERROR, rxData, 50)) {
         return false;
     }
 
+    // Parse response
     status.temperature = (int8_t)rxData[1];
     status.voltage = (uint16_t)(rxData[3] | (rxData[4] << 8));
     status.errorState = rxData[7];
@@ -143,16 +159,17 @@ bool readMotorStatus1(uint32_t canID, MotorStatus& status) {
 }
 
 // Read multi-turn angle
-bool readMultiTurnAngle(uint32_t canID, MotorStatus& status) {
-    if (!sendReadCommand(canID, READ_MULTI_ANGLE)) {
+bool readMultiTurnAngle(MotorStatus& status) {
+    if (!sendReadCommand(READ_MULTI_ANGLE)) {
         return false;
     }
 
     uint8_t rxData[8];
-    if (!readMotorResponse(canID, READ_MULTI_ANGLE, rxData, 50)) {
+    if (!readMotorResponse(READ_MULTI_ANGLE, rxData, 50)) {
         return false;
     }
 
+    // Parse response (int64_t, 7 bytes used)
     status.motorAngle = (int64_t)rxData[1]
                       | ((int64_t)rxData[2] << 8)
                       | ((int64_t)rxData[3] << 16)
@@ -163,154 +180,61 @@ bool readMultiTurnAngle(uint32_t canID, MotorStatus& status) {
     return true;
 }
 
-// Read acceleration
-bool readAcceleration(uint32_t canID, MotorStatus& status) {
-    if (!sendReadCommand(canID, READ_ACCELERATION)) {
-        return false;
-    }
-
-    uint8_t rxData[8];
-    if (!readMotorResponse(canID, READ_ACCELERATION, rxData, 50)) {
-        return false;
-    }
-
-    // Acceleration is int32_t, unit: 1dps/s
-    int32_t accel = (int32_t)(rxData[4] | (rxData[5] << 8) | (rxData[6] << 16) | (rxData[7] << 24));
-    status.acceleration = (int16_t)(accel);  // Truncate to int16_t for compact storage
-
-    return true;
-}
-
-// Clear motor angle (reset current position to zero) - Command 0x95
-bool clearMotorAngle(uint32_t canID) {
-    uint8_t txData[8] = {0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-
-    if (xSemaphoreTake(canMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        byte rc = CAN.sendMsgBuf(canID, 0, 8, txData);
-        xSemaphoreGive(canMutex);
-
-        if (rc == CAN_OK) {
-            // Wait for response confirmation
-            uint8_t rxData[8];
-            return readMotorResponse(canID, 0x95, rxData, 100);
-        }
-    }
-    return false;
-}
-
-// Read complete status for one motor
-bool readMotorComplete(uint8_t motorID, uint32_t canID, MotorStatus& status) {
-    status.motorID = motorID;
-
-    bool success = true;
-
-    if (!readMotorStatus1(canID, status)) {
-        success = false;
-    }
-
-    if (!readMotorStatus2(canID, status)) {
-        success = false;
-    }
-
-    if (!readMultiTurnAngle(canID, status)) {
-        success = false;
-    }
-
-    if (!readAcceleration(canID, status)) {
-        success = false;
-    }
-
-    if (success) {
-        status.timestamp = millis();
-    }
-
-    return success;
-}
-
 // CAN Reading Task (High Priority) - Runs on Core 1
 void canReadTask(void *parameter) {
-    MotorStatus status1 = {0};
-    MotorStatus status2 = {0};
+    MotorStatus status = {0};
 
     while (true) {
-        // Read Motor 1
-        if (readMotorComplete(MOTOR_ID_1, CAN_ID_1, status1)) {
-            xQueueSend(motorDataQueue, &status1, 0);
-            digitalWrite(LED_PIN, HIGH);
+        bool success = true;
+
+        // Read Status 1 (voltage, temperature, error)
+        if (!readMotorStatus1(status)) {
+            success = false;
         }
 
-        // Small delay between motors
-        vTaskDelay(pdMS_TO_TICKS(10));
-
-        // Read Motor 2
-        if (readMotorComplete(MOTOR_ID_2, CAN_ID_2, status2)) {
-            xQueueSend(motorDataQueue, &status2, 0);
-            digitalWrite(LED_PIN, LOW);
+        // Read Status 2 (torque, speed, encoder)
+        if (!readMotorStatus2(status)) {
+            success = false;
         }
 
-        // Wait before next read cycle (10Hz = 100ms total)
-        vTaskDelay(pdMS_TO_TICKS(90));
+        // Read multi-turn angle
+        if (!readMultiTurnAngle(status)) {
+            success = false;
+        }
+
+        if (success) {
+            status.timestamp = millis();
+
+            // Send to queue (non-blocking)
+            xQueueSend(motorDataQueue, &status, 0);
+
+            // Also update latest status directly for fast access
+            latestStatus = status;
+            dataReady = true;
+
+            // Blink LED on successful read
+            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+        }
+
+        // Wait before next read cycle (10Hz = 100ms)
+        vTaskDelay(pdMS_TO_TICKS(UPDATE_INTERVAL_MS));
     }
 }
 
 // Serial Output Task (Lower Priority) - Runs on Core 0
 void serialOutputTask(void *parameter) {
     MotorStatus status;
-    uint32_t outputCount1 = 0;
-    uint32_t outputCount2 = 0;
+    uint32_t outputCount = 0;
 
     while (true) {
-        // Check for serial commands (non-blocking)
-        if (Serial.available() > 0) {
-            String cmd = Serial.readStringUntil('\n');
-            cmd.trim();
-
-            if (cmd == "RESET_M1" || cmd == "RESET1") {
-                Serial.println("[CMD] Resetting Motor 1 angle to zero...");
-                if (clearMotorAngle(CAN_ID_1)) {
-                    Serial.println("[OK] Motor 1 angle reset successful!");
-                } else {
-                    Serial.println("[ERROR] Motor 1 angle reset failed!");
-                }
-            }
-            else if (cmd == "RESET_M2" || cmd == "RESET2") {
-                Serial.println("[CMD] Resetting Motor 2 angle to zero...");
-                if (clearMotorAngle(CAN_ID_2)) {
-                    Serial.println("[OK] Motor 2 angle reset successful!");
-                } else {
-                    Serial.println("[ERROR] Motor 2 angle reset failed!");
-                }
-            }
-            else if (cmd == "RESET_ALL" || cmd == "RESET") {
-                Serial.println("[CMD] Resetting ALL motor angles to zero...");
-                bool m1_ok = clearMotorAngle(CAN_ID_1);
-                vTaskDelay(pdMS_TO_TICKS(50));
-                bool m2_ok = clearMotorAngle(CAN_ID_2);
-
-                if (m1_ok && m2_ok) {
-                    Serial.println("[OK] All motor angles reset successful!");
-                } else {
-                    Serial.println("[ERROR] Some motor resets failed!");
-                }
-            }
-            else if (cmd == "HELP") {
-                Serial.println("\n=== Available Commands ===");
-                Serial.println("RESET_M1 or RESET1  - Reset Motor 1 angle to zero");
-                Serial.println("RESET_M2 or RESET2  - Reset Motor 2 angle to zero");
-                Serial.println("RESET_ALL or RESET  - Reset both motors");
-                Serial.println("HELP                - Show this help");
-                Serial.println("========================\n");
-            }
-        }
-
         // Wait for data from queue (blocking with timeout)
         if (xQueueReceive(motorDataQueue, &status, pdMS_TO_TICKS(200)) == pdTRUE) {
             // Output in compact format for GUI parsing
             Serial.print("[");
             Serial.print(status.timestamp);
-            Serial.print("] M:");
-            Serial.print(status.motorID);
-            Serial.print(" T:");
+            Serial.print("] ");
+
+            Serial.print("T:");
             Serial.print(status.temperature);
             Serial.print(" V:");
             Serial.print(status.voltage * 0.1, 1);
@@ -319,8 +243,6 @@ void serialOutputTask(void *parameter) {
             Serial.print(actualCurrent, 2);
             Serial.print(" S:");
             Serial.print(status.speed);
-            Serial.print(" ACC:");
-            Serial.print(status.acceleration);
             Serial.print(" E:");
             Serial.print(status.encoder);
             Serial.print(" A:");
@@ -330,19 +252,11 @@ void serialOutputTask(void *parameter) {
             Serial.print(status.errorState, HEX);
             Serial.println();
 
-            // Track output counts per motor
-            if (status.motorID == MOTOR_ID_1) {
-                outputCount1++;
-            } else if (status.motorID == MOTOR_ID_2) {
-                outputCount2++;
-            }
+            outputCount++;
 
-            // Print detailed status every 10 reads per motor (1 second at 10Hz)
-            if ((status.motorID == MOTOR_ID_1 && outputCount1 % 10 == 0) ||
-                (status.motorID == MOTOR_ID_2 && outputCount2 % 10 == 0)) {
-                Serial.print("--- Motor ");
-                Serial.print(status.motorID);
-                Serial.println(" Status (detailed) ---");
+            // Print detailed status every 10 reads (1 second at 10Hz)
+            if (outputCount % 10 == 0) {
+                Serial.println("--- Motor Status (detailed) ---");
                 Serial.print("Temperature:     ");
                 Serial.print(status.temperature);
                 Serial.println(" °C");
@@ -360,10 +274,6 @@ void serialOutputTask(void *parameter) {
                 Serial.print("Speed:           ");
                 Serial.print(status.speed);
                 Serial.println(" dps");
-
-                Serial.print("Acceleration:    ");
-                Serial.print(status.acceleration);
-                Serial.println(" dps/s");
 
                 Serial.print("Encoder:         ");
                 Serial.print(status.encoder);
@@ -391,7 +301,7 @@ void setup() {
     delay(1000);
 
     Serial.println("\n========================================");
-    Serial.println("   LK-TECH Dual Motor Status Reader");
+    Serial.println("   LK-TECH Motor Status Reader");
     Serial.println("   FreeRTOS Optimized - 10Hz");
     Serial.println("========================================\n");
 
@@ -403,7 +313,7 @@ void setup() {
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
     Serial.println("    SPI initialized");
 
-    // Initialize MCP2515 at 1Mbps
+    // Initialize MCP2515 at 1Mbps (motor requires 1Mbps!)
     Serial.println("\n[2] Initializing MCP2515...");
     Serial.println("    Trying 1MBPS @ 8MHz...");
 
@@ -416,6 +326,10 @@ void setup() {
 
     if (result != CAN_OK) {
         Serial.println("\n[ERROR] MCP2515 initialization FAILED!");
+        Serial.println("Check:");
+        Serial.println("  1. SPI wiring (CS, SCK, MISO, MOSI)");
+        Serial.println("  2. MCP2515 power (VCC=5V, GND)");
+        Serial.println("  3. Crystal frequency (8MHz or 16MHz)");
         while (1) {
             digitalWrite(LED_PIN, !digitalRead(LED_PIN));
             delay(200);
@@ -432,8 +346,8 @@ void setup() {
     // Create FreeRTOS objects
     Serial.println("\n[4] Creating FreeRTOS tasks...");
 
-    // Create queue for motor data (capacity: 20 items for both motors)
-    motorDataQueue = xQueueCreate(20, sizeof(MotorStatus));
+    // Create queue for motor data (capacity: 10 items)
+    motorDataQueue = xQueueCreate(10, sizeof(MotorStatus));
     if (motorDataQueue == NULL) {
         Serial.println("    [ERROR] Failed to create queue!");
         while(1);
@@ -448,39 +362,38 @@ void setup() {
 
     // Create CAN reading task (high priority, core 1)
     xTaskCreatePinnedToCore(
-        canReadTask,
-        "CAN_Read",
-        4096,
-        NULL,
-        3,
-        &canReadTaskHandle,
-        1
+        canReadTask,           // Task function
+        "CAN_Read",            // Task name
+        4096,                  // Stack size
+        NULL,                  // Parameters
+        3,                     // Priority (high)
+        &canReadTaskHandle,    // Task handle
+        1                      // Core 1
     );
 
     // Create Serial output task (lower priority, core 0)
     xTaskCreatePinnedToCore(
-        serialOutputTask,
-        "Serial_Output",
-        4096,
-        NULL,
-        1,
-        &serialOutputTaskHandle,
-        0
+        serialOutputTask,      // Task function
+        "Serial_Output",       // Task name
+        4096,                  // Stack size
+        NULL,                  // Parameters
+        1,                     // Priority (lower)
+        &serialOutputTaskHandle, // Task handle
+        0                      // Core 0
     );
 
     Serial.println("    Tasks created successfully!");
-    Serial.println("\n[OK] Dual Motor Status Reader ready!");
+    Serial.println("\n[OK] Motor Status Reader ready!");
     Serial.println("========================================");
-    Serial.print("Monitoring Motors: ID=");
-    Serial.print(MOTOR_ID_1);
-    Serial.print(" and ID=");
-    Serial.println(MOTOR_ID_2);
+    Serial.print("Monitoring Motor ID=");
+    Serial.println(MOTOR_ID);
     Serial.print("Update rate: ");
     Serial.print(1000 / UPDATE_INTERVAL_MS);
-    Serial.println(" Hz per motor\n");
+    Serial.println(" Hz (10x faster!)\n");
 }
 
 void loop() {
     // Main loop is now empty - everything handled by FreeRTOS tasks
+    // This prevents blocking the watchdog
     vTaskDelay(pdMS_TO_TICKS(1000));
 }

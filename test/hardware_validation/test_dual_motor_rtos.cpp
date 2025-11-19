@@ -324,8 +324,13 @@ void serialOutputTask(void *parameter) {
             Serial.print(" E:");
             Serial.print(status.encoder);
             Serial.print(" A:");
-            float angleDeg = (float)status.motorAngle * 0.01;
-            Serial.print(angleDeg, 2);
+            // Check for overflow: valid range is roughly ±2^53 (float precision limit)
+            if (status.motorAngle > 9007199254740992LL || status.motorAngle < -9007199254740992LL) {
+                Serial.print("ovf");
+            } else {
+                float angleDeg = (float)status.motorAngle * 0.01;
+                Serial.print(angleDeg, 2);
+            }
             Serial.print(" ERR:0x");
             Serial.print(status.errorState, HEX);
             Serial.println();
@@ -370,10 +375,19 @@ void serialOutputTask(void *parameter) {
                 Serial.println(" (0~16383)");
 
                 Serial.print("Multi-turn Angle:");
-                Serial.print(angleDeg, 2);
-                Serial.print(" °  (");
-                Serial.print(angleDeg / 360.0, 2);
-                Serial.println(" turns)");
+                // Check for overflow
+                if (status.motorAngle > 9007199254740992LL || status.motorAngle < -9007199254740992LL) {
+                    Serial.print("ovf");
+                    Serial.print(" °  (ovf turns) [RAW: 0x");
+                    Serial.print((uint32_t)(status.motorAngle >> 32), HEX);
+                    Serial.print((uint32_t)(status.motorAngle & 0xFFFFFFFF), HEX);
+                    Serial.println("]");
+                } else {
+                    Serial.print(angleDeg, 2);
+                    Serial.print(" °  (");
+                    Serial.print(angleDeg / 360.0, 2);
+                    Serial.println(" turns)");
+                }
 
                 Serial.print("Error State:     0x");
                 Serial.print(status.errorState, HEX);
@@ -429,8 +443,27 @@ void setup() {
     CAN.setMode(MCP_NORMAL);
     Serial.println("    Mode set to NORMAL");
 
+    // Auto-reset motor angles on startup
+    Serial.println("\n[4] Resetting motor angles to zero...");
+    Serial.print("    Motor 1: ");
+    if (clearMotorAngle(CAN_ID_1)) {
+        Serial.println("OK");
+    } else {
+        Serial.println("FAILED (motor may not be connected)");
+    }
+    delay(50);
+
+    Serial.print("    Motor 2: ");
+    if (clearMotorAngle(CAN_ID_2)) {
+        Serial.println("OK");
+    } else {
+        Serial.println("FAILED (motor may not be connected)");
+    }
+    delay(50);
+    Serial.println("    Auto-reset complete!");
+
     // Create FreeRTOS objects
-    Serial.println("\n[4] Creating FreeRTOS tasks...");
+    Serial.println("\n[5] Creating FreeRTOS tasks...");
 
     // Create queue for motor data (capacity: 20 items for both motors)
     motorDataQueue = xQueueCreate(20, sizeof(MotorStatus));
