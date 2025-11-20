@@ -28,7 +28,7 @@
 #include <WiFi.h>
 
 // ---------------- WiFi STA Parameters ----------------
-const char* wifi_ssid = "ExoPulse";        // Mobile hotspot name
+const char* wifi_ssid = "鄭樓溙";        // Mobile hotspot name
 const char* wifi_password = "12345666";    // Mobile hotspot password
 
 WiFiServer server(8888);                   // TCP Server port
