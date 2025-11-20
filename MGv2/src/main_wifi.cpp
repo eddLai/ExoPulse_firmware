@@ -383,27 +383,48 @@ void setup() {
     }
 
     // Initialize WiFi
-    Serial.print("Connecting to WiFi: ");
+    Serial.println("Starting WiFi initialization...");
+    Serial.print("SSID: ");
     Serial.println(WIFI_SSID);
+    Serial.print("Password: ");
+    Serial.println(WIFI_PASSWORD);
+
+    WiFi.mode(WIFI_STA);
+    delay(100);
+    Serial.println("WiFi mode set to STA");
+
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.println("WiFi.begin() called");
+    delay(100);
 
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    Serial.print("Connecting");
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
         delay(500);
         Serial.print(".");
+        Serial.flush();  // 強制刷新緩衝區
         attempts++;
+
+        if (attempts % 10 == 0) {
+            Serial.print(" [");
+            Serial.print(attempts);
+            Serial.print("] ");
+        }
     }
+    Serial.println();
 
     if (WiFi.status() == WL_CONNECTED) {
         wifi_connected = true;
-        Serial.println("\n✓ WiFi Connected!");
+        Serial.println("✓ WiFi Connected!");
         Serial.print("IP Address: ");
         Serial.println(WiFi.localIP());
         Serial.print("Signal (RSSI): ");
         Serial.print(WiFi.RSSI());
         Serial.println(" dBm");
     } else {
-        Serial.println("\n✗ WiFi Failed!");
+        Serial.println("✗ WiFi Failed!");
+        Serial.print("Final WiFi status: ");
+        Serial.println(WiFi.status());
         Serial.println("Continuing with Serial only...");
     }
 
