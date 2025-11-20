@@ -134,22 +134,33 @@ class EnhancedDualMotorGUI:
             except:
                 break
 
-    def reset_motor_angle(self, motor_id):
-        """Send reset command to motor via serial (thread-safe)"""
+    def calibrate_motor(self, motor_id):
+        """Calibrate motor zero position (software offset, no ROM write)"""
         with self.serial_lock:
             if self.ser and self.ser.is_open:
                 if motor_id == 1:
-                    self.ser.write(b"RESET_M1\n")
+                    self.ser.write(b"CAL1\n")
                     self.ser.flush()
-                    print("✓ Reset command sent to Motor 1")
+                    print("✓ Calibrating Motor 1 (software offset)...")
                 elif motor_id == 2:
-                    self.ser.write(b"RESET_M2\n")
+                    self.ser.write(b"CAL2\n")
                     self.ser.flush()
-                    print("✓ Reset command sent to Motor 2")
-                elif motor_id == 0:  # Reset all
-                    self.ser.write(b"RESET_ALL\n")
+                    print("✓ Calibrating Motor 2 (software offset)...")
+                elif motor_id == 0:  # Calibrate both
+                    self.ser.write(b"CAL1\n")
                     self.ser.flush()
-                    print("✓ Reset command sent to ALL motors")
+                    time.sleep(0.2)  # Small delay between commands
+                    self.ser.write(b"CAL2\n")
+                    self.ser.flush()
+                    print("✓ Calibrating BOTH motors (software offset)...")
+
+    def clear_calibration(self):
+        """Clear all calibration offsets (restore original angles)"""
+        with self.serial_lock:
+            if self.ser and self.ser.is_open:
+                self.ser.write(b"CLEAR_CAL\n")
+                self.ser.flush()
+                print("✓ Calibration cleared - angles restored to original values")
 
     def init_plot(self):
         """Initialize plots with 5 rows: Temp, Current, Speed, Acceleration, Angle"""
@@ -247,19 +258,22 @@ class EnhancedDualMotorGUI:
         self.line2_accel, = self.ax2_accel.plot([], [], 'orange', lw=2)
         self.line2_angle, = self.ax2_angle.plot([], [], 'orange', lw=2)
 
-        # Add reset buttons at top
+        # Add calibration buttons at top (4 buttons layout)
         from matplotlib.widgets import Button
-        ax_reset_m1 = plt.axes([0.15, 0.96, 0.12, 0.03])
-        ax_reset_m2 = plt.axes([0.73, 0.96, 0.12, 0.03])
-        ax_reset_all = plt.axes([0.44, 0.96, 0.12, 0.03])
+        ax_cal_m1 = plt.axes([0.10, 0.96, 0.11, 0.03])
+        ax_cal_m2 = plt.axes([0.79, 0.96, 0.11, 0.03])
+        ax_cal_both = plt.axes([0.36, 0.96, 0.13, 0.03])
+        ax_clear = plt.axes([0.53, 0.96, 0.13, 0.03])
 
-        self.btn_reset_m1 = Button(ax_reset_m1, 'Reset Motor 1', color='cyan', hovercolor='lightblue')
-        self.btn_reset_m2 = Button(ax_reset_m2, 'Reset Motor 2', color='orange', hovercolor='lightsalmon')
-        self.btn_reset_all = Button(ax_reset_all, 'Reset Both', color='lime', hovercolor='lightgreen')
+        self.btn_cal_m1 = Button(ax_cal_m1, 'Cal Motor 1', color='cyan', hovercolor='lightblue')
+        self.btn_cal_m2 = Button(ax_cal_m2, 'Cal Motor 2', color='orange', hovercolor='lightsalmon')
+        self.btn_cal_both = Button(ax_cal_both, 'Cal Both', color='lime', hovercolor='lightgreen')
+        self.btn_clear = Button(ax_clear, 'Clear Cal', color='red', hovercolor='salmon')
 
-        self.btn_reset_m1.on_clicked(lambda event: self.reset_motor_angle(1))
-        self.btn_reset_m2.on_clicked(lambda event: self.reset_motor_angle(2))
-        self.btn_reset_all.on_clicked(lambda event: self.reset_motor_angle(0))
+        self.btn_cal_m1.on_clicked(lambda event: self.calibrate_motor(1))
+        self.btn_cal_m2.on_clicked(lambda event: self.calibrate_motor(2))
+        self.btn_cal_both.on_clicked(lambda event: self.calibrate_motor(0))
+        self.btn_clear.on_clicked(lambda event: self.clear_calibration())
 
         # Status text at bottom
         self.fig.text(0.5, 0.03, '', ha='center', fontsize=9, family='monospace', color='lime')
@@ -363,14 +377,17 @@ class EnhancedDualMotorGUI:
         print("Starting Enhanced Monitor with Full Data Display...")
         print("Acceleration data is now available via CAN command 0x33!")
 
-        # Auto-reset both motors on GUI launch
-        print("\nAuto-resetting motor angles...")
+        # Auto-calibrate both motors on GUI launch (software offset)
+        print("\nAuto-calibrating motor angles (software offset)...")
         time.sleep(0.5)  # Wait for firmware to be ready
-        self.reset_motor_angle(0)  # Reset both motors
-        time.sleep(1)  # Wait for reset to complete
-        print("Motor angles reset to zero!\n")
+        self.calibrate_motor(0)  # Calibrate both motors
+        time.sleep(0.5)  # Wait for calibration to complete
+        print("Motor angles calibrated to zero!\n")
 
-        print("Click the buttons at the top to reset motor angles again if needed.")
+        print("Click buttons at top:")
+        print("  - Cal Motor 1/2: Calibrate individual motor")
+        print("  - Cal Both: Calibrate both motors")
+        print("  - Clear Cal: Restore original angles (no calibration)")
 
         self.running = True
         self.thread = threading.Thread(target=self.read_serial_thread, daemon=True)
@@ -403,8 +420,9 @@ def main():
     print("  - 5 plots per motor: Temp, Current, Speed, Acceleration, Angle")
     print("  - Speed shown in rad/s (left) and °/s (right)")
     print("  - Acceleration in dps/s (degrees per second squared)")
-    print("  - Multi-turn angle tracking with RESET buttons")
-    print("  - Click buttons to reset angle to zero (CAN cmd 0x95)")
+    print("  - Multi-turn angle tracking with SOFTWARE CALIBRATION")
+    print("  - Calibration: Safe, instant, no ROM write (resets on reboot)")
+    print("  - Buttons: Cal M1/M2, Cal Both, Clear Cal")
     print("=" * 70)
 
     monitor = EnhancedDualMotorGUI(port, baudrate, max_points=100)
