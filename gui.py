@@ -217,6 +217,10 @@ class ExoPulseUnifiedGUI(QMainWindow):
     def _init_ui(self):
         """Initialize the user interface"""
 
+        # Initialize collections first
+        self.sidebar_buttons = []
+        self.content_stack = QStackedWidget()
+
         # Main widget and layout
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -232,7 +236,6 @@ class ExoPulseUnifiedGUI(QMainWindow):
         splitter.addWidget(sidebar)
 
         # === RIGHT CONTENT AREA ===
-        self.content_stack = QStackedWidget()
         splitter.addWidget(self.content_stack)
 
         # Set splitter sizes (sidebar: 250px, content: rest)
@@ -282,8 +285,6 @@ class ExoPulseUnifiedGUI(QMainWindow):
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(0, 10, 0, 10)
         scroll_layout.setSpacing(2)
-
-        self.sidebar_buttons = []
 
         # Component definitions
         components = [
