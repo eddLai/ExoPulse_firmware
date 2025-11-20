@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ExoPulse Unified GUI Launcher
+ExoPulse Unified GUI with Integrated Motor Control
 
-A comprehensive GUI application that integrates all ExoPulse UI components
-with a smooth sidebar navigation interface.
+Main interface with dynamic sidebar based on motor mode selection.
 """
 
 import sys
-import subprocess
 from pathlib import Path
+
+# Import the motor control GUI
+sys.path.insert(0, str(Path(__file__).parent / "UI_components"))
+from motor_control import ExoPulseGUI as MotorControlWidget
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QFrame, QStackedWidget, QScrollArea, QTextEdit,
-    QSplitter, QGroupBox
+    QPushButton, QLabel, QFrame, QStackedWidget, QScrollArea,
+    QSplitter, QGroupBox, QTextEdit
 )
-from PySide6.QtCore import Qt, QSize, QProcess
-from PySide6.QtGui import QFont, QColor, QPalette, QIcon
+from PySide6.QtCore import Qt, QProcess
+from PySide6.QtGui import QFont
 
 
 class ComponentLauncher(QWidget):
-    """Widget for launching individual UI components"""
+    """Widget for launching external UI components"""
 
     def __init__(self, component_name, display_name, description, script_path):
         super().__init__()
@@ -72,9 +74,6 @@ class ComponentLauncher(QWidget):
             }
             QPushButton:hover {
                 background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
             }
             QPushButton:disabled {
                 background-color: #cccccc;
@@ -181,6 +180,10 @@ class SidebarButton(QPushButton):
         super().__init__(f"{icon_text}  {text}")
         self.setCheckable(True)
         self.setMinimumHeight(50)
+        self._update_style()
+
+    def _update_style(self):
+        """Update button style based on enabled state"""
         self.setStyleSheet("""
             QPushButton {
                 text-align: left;
@@ -190,7 +193,7 @@ class SidebarButton(QPushButton):
                 color: #333;
                 font-size: 11pt;
             }
-            QPushButton:hover {
+            QPushButton:hover:enabled {
                 background-color: #e0e0e0;
             }
             QPushButton:checked {
@@ -199,27 +202,58 @@ class SidebarButton(QPushButton):
                 font-weight: bold;
                 border-left: 4px solid #1976D2;
             }
+            QPushButton:disabled {
+                color: #999;
+                background-color: #f5f5f5;
+            }
         """)
+
+    def setEnabled(self, enabled):
+        """Override setEnabled to update style"""
+        super().setEnabled(enabled)
+        self._update_style()
 
 
 class ExoPulseUnifiedGUI(QMainWindow):
-    """Main unified GUI application for ExoPulse"""
+    """Main unified GUI with integrated motor control and dynamic sidebar"""
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ExoPulse Unified Control Panel")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 1400, 900)
 
         self.ui_dir = Path(__file__).parent / "UI_components"
 
+        # Initialize collections
+        self.sidebar_buttons = []
+        self.content_stack = QStackedWidget()
+
+        # Component configurations (name, display, description, script, requires_can_mode)
+        self.components = [
+            # Always available - Main control
+            ("motor_control", "Motor Control", "Main motor control interface", None, False, False),
+
+            # High-level monitoring tools
+            ("motor_monitor", "Motor Monitor", "Advanced monitoring with configurable plots", "motor_monitor.py", True, False),
+            ("dual_motor_plotter", "Dual Motor Plotter", "Real-time dual motor visualization (CAN only)", "dual_motor_plotter.py", True, False),
+            ("can_plotter", "CAN Plotter", "CAN bus data visualization", "can_plotter.py", True, False),
+
+            # WiFi tools
+            ("wifi_monitor", "WiFi Monitor", "WiFi-based remote monitoring", "wifi_monitor.py", False, True),
+            ("wifi_dual_motor_plotter", "WiFi Dual Motor Plot", "WiFi dual motor plotter", "wifi_dual_motor_plotter.py", False, True),
+
+            # Independent tools
+            ("serial_reader", "Serial Reader", "Simple serial port data reader", "serial_reader.py", False, False),
+            ("emg_plotter", "EMG Plotter", "EMG signal visualization", "emg_plotter.py", False, False),
+        ]
+
         self._init_ui()
+
+        # Connect motor control signals
+        self._connect_motor_control_signals()
 
     def _init_ui(self):
         """Initialize the user interface"""
-
-        # Initialize collections first
-        self.sidebar_buttons = []
-        self.content_stack = QStackedWidget()
 
         # Main widget and layout
         main_widget = QWidget()
@@ -236,18 +270,29 @@ class ExoPulseUnifiedGUI(QMainWindow):
         splitter.addWidget(sidebar)
 
         # === RIGHT CONTENT AREA ===
+        # First page: Motor Control (embedded)
+        self.motor_control = MotorControlWidget()
+        self.content_stack.addWidget(self.motor_control)
+
+        # Additional pages: Component launchers
+        for comp in self.components[1:]:  # Skip motor_control (already added)
+            comp_id, display_name, description, script_name = comp[:4]
+            script_path = self.ui_dir / script_name
+            launcher = ComponentLauncher(comp_id, display_name, description, script_path)
+            self.content_stack.addWidget(launcher)
+
         splitter.addWidget(self.content_stack)
 
         # Set splitter sizes (sidebar: 250px, content: rest)
-        splitter.setSizes([250, 950])
+        splitter.setSizes([250, 1150])
         splitter.setCollapsible(0, False)
 
         main_layout.addWidget(splitter)
 
-        # Apply dark theme
+        # Apply theme
         self._apply_theme()
 
-        # Select first component by default
+        # Select first component (motor control) by default
         if self.sidebar_buttons:
             self.sidebar_buttons[0].setChecked(True)
             self.content_stack.setCurrentIndex(0)
@@ -286,52 +331,68 @@ class ExoPulseUnifiedGUI(QMainWindow):
         scroll_layout.setContentsMargins(0, 10, 0, 10)
         scroll_layout.setSpacing(2)
 
-        # Component definitions
-        components = [
-            # Low-level
-            ("Low-Level Components", None, None, None, True),
-            ("motor_control", "Motor Control", "Basic motor control interface with WiFi/UART support", "motor_control.py", False),
-            ("serial_reader", "Serial Reader", "Simple serial port data reader utility", "serial_reader.py", False),
+        # Section: Main Control
+        section_label = QLabel("Main Control")
+        section_label.setStyleSheet("""
+            color: #2196F3;
+            font-weight: bold;
+            font-size: 10pt;
+            padding: 15px 20px 5px 20px;
+        """)
+        scroll_layout.addWidget(section_label)
 
-            # High-level
-            ("High-Level Components", None, None, None, True),
-            ("motor_monitor", "Motor Monitor", "Advanced monitoring with configurable real-time plots", "motor_monitor.py", False),
-            ("dual_motor_plotter", "Dual Motor Plotter", "Real-time dual motor data visualization", "dual_motor_plotter.py", False),
-            ("wifi_monitor", "WiFi Monitor", "WiFi-based remote motor monitoring", "wifi_monitor.py", False),
-            ("wifi_dual_motor_plotter", "WiFi Dual Motor Plot", "WiFi dual motor data plotter", "wifi_dual_motor_plotter.py", False),
-            ("can_plotter", "CAN Plotter", "CAN bus data visualization tool", "can_plotter.py", False),
-            ("emg_plotter", "EMG Plotter", "EMG signal acquisition and visualization", "emg_plotter.py", False),
-        ]
+        # Create buttons for all components
+        for idx, comp in enumerate(self.components):
+            comp_id, display_name, description, script_name, requires_can, is_wifi_tool = comp
 
-        for comp in components:
-            if comp[4]:  # Is section header
-                section_label = QLabel(comp[0])
+            # Determine icon
+            if idx == 0:
+                icon = "🎛️"  # Main control
+            elif requires_can:
+                icon = "📊"  # CAN monitoring
+            elif is_wifi_tool:
+                icon = "📡"  # WiFi tools
+            else:
+                icon = "⚙️"  # General tools
+
+            # Add section headers
+            if idx == 1:
+                section_label = QLabel("CAN Monitoring Tools")
                 section_label.setStyleSheet("""
                     color: #2196F3;
                     font-weight: bold;
                     font-size: 10pt;
                     padding: 15px 20px 5px 20px;
-                    background-color: transparent;
                 """)
                 scroll_layout.addWidget(section_label)
-            else:
-                comp_id, display_name, description, script_name = comp[:4]
-                script_path = self.ui_dir / script_name
+            elif idx == 4:
+                section_label = QLabel("WiFi Tools")
+                section_label.setStyleSheet("""
+                    color: #2196F3;
+                    font-weight: bold;
+                    font-size: 10pt;
+                    padding: 15px 20px 5px 20px;
+                """)
+                scroll_layout.addWidget(section_label)
+            elif idx == 6:
+                section_label = QLabel("General Tools")
+                section_label.setStyleSheet("""
+                    color: #2196F3;
+                    font-weight: bold;
+                    font-size: 10pt;
+                    padding: 15px 20px 5px 20px;
+                """)
+                scroll_layout.addWidget(section_label)
 
-                # Create button
-                # Determine icon based on component index
-                if len(self.sidebar_buttons) < 2:
-                    icon = "⚙️"  # Low-level components
-                else:
-                    icon = "📊"  # High-level components
-                btn = SidebarButton(display_name, icon)
-                btn.clicked.connect(lambda checked, idx=len(self.sidebar_buttons): self._on_sidebar_click(idx))
-                scroll_layout.addWidget(btn)
-                self.sidebar_buttons.append(btn)
+            # Create button
+            btn = SidebarButton(display_name, icon)
+            btn.clicked.connect(lambda checked, i=idx: self._on_sidebar_click(i))
+            scroll_layout.addWidget(btn)
+            self.sidebar_buttons.append(btn)
 
-                # Create launcher widget
-                launcher = ComponentLauncher(comp_id, display_name, description, script_path)
-                self.content_stack.addWidget(launcher)
+            # Store metadata
+            btn.setProperty("requires_can", requires_can)
+            btn.setProperty("is_wifi_tool", is_wifi_tool)
 
         scroll_layout.addStretch()
         scroll.setWidget(scroll_content)
@@ -349,6 +410,36 @@ class ExoPulseUnifiedGUI(QMainWindow):
         layout.addWidget(footer)
 
         return sidebar_widget
+
+    def _connect_motor_control_signals(self):
+        """Connect signals from motor control to update sidebar"""
+        # Connect motor type change signal
+        self.motor_control.radio_can.toggled.connect(self._on_motor_type_changed)
+        self.motor_control.radio_wifi.toggled.connect(self._on_comm_mode_changed)
+
+    def _on_motor_type_changed(self, checked):
+        """Handle motor type change to enable/disable sidebar buttons"""
+        is_can_mode = checked
+
+        for btn in self.sidebar_buttons:
+            requires_can = btn.property("requires_can")
+            if requires_can:
+                btn.setEnabled(is_can_mode)
+
+        # Log the mode change
+        mode_name = "CAN" if is_can_mode else "Lower Chip"
+        print(f"Motor mode changed to: {mode_name}")
+        print(f"CAN monitoring tools {'enabled' if is_can_mode else 'disabled'}")
+
+    def _on_comm_mode_changed(self, checked):
+        """Handle communication mode change"""
+        is_wifi_mode = checked
+
+        for btn in self.sidebar_buttons:
+            is_wifi_tool = btn.property("is_wifi_tool")
+            if is_wifi_tool:
+                # WiFi tools more useful in WiFi mode, but still accessible
+                pass  # Keep enabled for now
 
     def _on_sidebar_click(self, index):
         """Handle sidebar button click"""
