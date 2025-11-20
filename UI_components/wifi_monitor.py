@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 ExoPulse WiFi Dual Motor Monitor
-TCP網路版本的即時馬達監控系統
+Real-time motor monitoring system via TCP network
 
-特色：
-- 透過WiFi TCP連接ESP32
-- 雙馬達即時圖表顯示
-- 遠端校正命令
-- 自動重連功能
-- 跨平台支援 (macOS, Linux, Windows)
+Features:
+- WiFi TCP connection to ESP32
+- Real-time dual motor chart display
+- Remote calibration commands
+- Automatic reconnection
+- Cross-platform support (macOS, Linux, Windows)
 """
 
 import os
@@ -21,7 +21,7 @@ import re
 from collections import deque
 import numpy as np
 
-# macOS 相容性
+# macOS compatibility
 if platform.system() == 'Darwin':
     try:
         import matplotlib
@@ -50,7 +50,7 @@ class WiFiMotorMonitor:
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
 
-        # Motor 1 資料
+        # Motor 1 data
         self.data_m1 = {
             'time': deque(maxlen=max_points),
             'temp': deque(maxlen=max_points),
@@ -60,7 +60,7 @@ class WiFiMotorMonitor:
             'angle': deque(maxlen=max_points),
         }
 
-        # Motor 2 資料
+        # Motor 2 data
         self.data_m2 = {
             'time': deque(maxlen=max_points),
             'temp': deque(maxlen=max_points),
@@ -75,12 +75,35 @@ class WiFiMotorMonitor:
         self.status_m2 = {'motor_id': 2, 'temp': 0, 'voltage': 0, 'current': 0,
                          'speed': 0, 'acceleration': 0, 'angle': 0}
 
+        # WiFi signal strength data
+        self.data_rssi = {
+            'time': deque(maxlen=max_points),
+            'mcu_rssi': deque(maxlen=max_points),    # MCU to hotspot
+            'pc_rssi': deque(maxlen=max_points),      # PC to hotspot
+        }
+        self.mcu_rssi = 0
+        self.pc_rssi = 0
+
         self.start_time = time.time()
 
-    def connect(self):
-        """連接到ESP32 WiFi TCP server"""
+    def get_pc_wifi_rssi(self):
+        """Get PC WiFi signal strength (Linux)"""
         try:
-            print(f"⚙ 正在連接 {self.host}:{self.port}...")
+            import subprocess
+            result = subprocess.run(['iwconfig'], capture_output=True, text=True, timeout=1)
+            for line in result.stdout.split('\n'):
+                if 'Signal level' in line:
+                    match = re.search(r'Signal level[=:]([-\d]+)', line)
+                    if match:
+                        return int(match.group(1))
+        except:
+            pass
+        return 0
+
+    def connect(self):
+        """Connect to ESP32 WiFi TCP server"""
+        try:
+            print(f"⚚ Connecting to {self.host}:{self.port}...")
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.settimeout(5.0)
             self.sock.connect((self.host, self.port))
@@ -88,33 +111,36 @@ class WiFiMotorMonitor:
             self.connection_status = "Connected"
             self.reconnect_attempts = 0
 
-            # 讀取歡迎訊息
+            # Get PC WiFi signal strength
+            self.pc_rssi = self.get_pc_wifi_rssi()
+
+            # Read welcome message
             try:
                 welcome = self.sock.recv(1024).decode('utf-8', errors='ignore')
                 print(f"✓ {welcome.strip()}")
             except:
                 pass
 
-            print(f"✓ 已連接到 {self.host}:{self.port}")
+            print(f"✓ Connected to {self.host}:{self.port}")
             return True
         except Exception as e:
             self.connection_status = f"Error: {e}"
-            print(f"✗ 連接失敗: {e}")
-            print(f"   提示: 檢查ESP32電源並確認WiFi已連接")
-            print(f"   確認IP位址符合ESP32序列埠輸出的IP")
+            print(f"✗ Connection failed: {e}")
+            print(f"   Hint: Check ESP32 power and ensure WiFi is connected")
+            print(f"   Verify IP address matches ESP32 serial output")
             return False
 
     def reconnect(self):
-        """嘗試重新連接"""
+        """Attempt to reconnect"""
         if self.reconnect_attempts >= self.max_reconnect_attempts:
-            print(f"✗ 達到最大重連次數 ({self.max_reconnect_attempts}). 放棄連接.")
+            print(f"✗ Maximum reconnection attempts reached ({self.max_reconnect_attempts}). Giving up.")
             return False
 
         self.reconnect_attempts += 1
         self.connection_status = f"Reconnecting... ({self.reconnect_attempts}/{self.max_reconnect_attempts})"
-        print(f"\n⚠ 連接中斷! 嘗試重新連接 ({self.reconnect_attempts}/{self.max_reconnect_attempts})...")
+        print(f"\n⚠ Connection lost! Attempting to reconnect ({self.reconnect_attempts}/{self.max_reconnect_attempts})...")
 
-        # 關閉舊連接
+        # Close old connection
         try:
             if self.sock:
                 self.sock.close()
@@ -123,7 +149,7 @@ class WiFiMotorMonitor:
 
         time.sleep(2)
 
-        # 嘗試重連
+        # Attempt reconnection
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.settimeout(5.0)
@@ -131,27 +157,27 @@ class WiFiMotorMonitor:
             self.sock.settimeout(0.5)
             self.connection_status = "Connected (Reconnected)"
             self.reconnect_attempts = 0
-            print(f"✓ 重新連接成功!")
+            print(f"✓ Reconnection successful!")
             return True
         except Exception as e:
             self.connection_status = f"Reconnect failed: {e}"
-            print(f"✗ 重新連接失敗: {e}")
+            print(f"✗ Reconnection failed: {e}")
             return False
 
     def send_command(self, command):
-        """透過WiFi發送命令到ESP32"""
+        """Send command to ESP32 via WiFi"""
         try:
             with self.connection_lock:
                 if self.sock:
                     self.sock.sendall((command + '\n').encode('utf-8'))
-                    print(f"[CMD] 已發送: {command}")
+                    print(f"[CMD] Sent: {command}")
                     return True
         except Exception as e:
-            print(f"[ERR] 發送命令失敗: {e}")
+            print(f"[ERR] Command send failed: {e}")
             return False
 
     def parse_line(self, line):
-        """解析馬達狀態資料行"""
+        """Parse motor status data line"""
         if not line.startswith('['):
             return None
         try:
@@ -172,11 +198,11 @@ class WiFiMotorMonitor:
                     'error': match.group(10)
                 }
         except Exception as e:
-            print(f"解析錯誤: {e} | 資料行: {line}")
+            print(f"Parse error: {e} | Line: {line}")
         return None
 
     def read_data(self):
-        """背景執行緒：從WiFi讀取資料"""
+        """Background thread: Read data from WiFi"""
         buffer = ""
         while self.running:
             try:
@@ -184,20 +210,26 @@ class WiFiMotorMonitor:
                     if self.sock:
                         data = self.sock.recv(4096).decode('utf-8', errors='ignore')
                         if not data:
-                            raise ConnectionResetError("伺服器關閉連接")
+                            raise ConnectionResetError("Server closed connection")
                         buffer += data
 
-                # 處理完整的行
+                # Process complete lines
                 while '\n' in buffer:
                     line, buffer = buffer.split('\n', 1)
                     line = line.strip()
 
-                    # 跳過命令回應
+                    # Skip command responses
                     if line.startswith('[OK]') or line.startswith('[ERR]') or line.startswith('[STATUS]'):
                         print(line)
                         continue
 
-                    # 解析馬達資料
+                    # Check for RSSI information
+                    if 'Signal:' in line or 'RSSI:' in line:
+                        match = re.search(r'(Signal|RSSI):\s*([-\d]+)', line)
+                        if match:
+                            self.mcu_rssi = int(match.group(2))
+
+                    # Parse motor data
                     data = self.parse_line(line)
                     if data:
                         elapsed = time.time() - self.start_time
@@ -212,6 +244,12 @@ class WiFiMotorMonitor:
                             self.data_m1['acceleration'].append(data['acceleration'])
                             self.data_m1['angle'].append(data['angle'])
 
+                            # Update RSSI data
+                            self.pc_rssi = self.get_pc_wifi_rssi()
+                            self.data_rssi['time'].append(elapsed)
+                            self.data_rssi['mcu_rssi'].append(self.mcu_rssi)
+                            self.data_rssi['pc_rssi'].append(self.pc_rssi)
+
                         elif motor_id == 2:
                             self.status_m2.update(data)
                             self.data_m2['time'].append(elapsed)
@@ -224,12 +262,12 @@ class WiFiMotorMonitor:
             except socket.timeout:
                 continue
             except Exception as e:
-                print(f"[ERR] 讀取錯誤: {e}")
+                print(f"[ERR] Read error: {e}")
                 if self.running and not self.reconnect():
                     break
                 time.sleep(1)
 
-    # 校正命令
+    # Calibration commands
     def calibrate_motor1(self, event=None):
         self.send_command("CAL1")
 
@@ -246,8 +284,18 @@ class WiFiMotorMonitor:
         self.send_command("STATUS")
 
     def update_plot(self, frame):
-        """更新matplotlib圖表"""
-        # 更新 Motor 1 圖表
+        """Update matplotlib plots"""
+        # Update WiFi RSSI plot
+        if len(self.data_rssi['time']) > 0:
+            t_rssi = list(self.data_rssi['time'])
+
+            self.line_mcu_rssi.set_data(t_rssi, list(self.data_rssi['mcu_rssi']))
+            self.line_pc_rssi.set_data(t_rssi, list(self.data_rssi['pc_rssi']))
+
+            self.ax_rssi.relim()
+            self.ax_rssi.autoscale_view(scalex=True, scaley=False)  # Only autoscale X axis
+
+        # Update Motor 1 plots
         if len(self.data_m1['time']) > 0:
             t_m1 = list(self.data_m1['time'])
 
@@ -271,7 +319,7 @@ class WiFiMotorMonitor:
             self.ax_m1_angle.relim()
             self.ax_m1_angle.autoscale_view()
 
-        # 更新 Motor 2 圖表
+        # Update Motor 2 plots
         if len(self.data_m2['time']) > 0:
             t_m2 = list(self.data_m2['time'])
 
@@ -295,53 +343,68 @@ class WiFiMotorMonitor:
             self.ax_m2_angle.relim()
             self.ax_m2_angle.autoscale_view()
 
-        # 更新狀態文字
+        # Update status text
         status_color = 'green' if 'Connected' in self.connection_status else 'red'
-        self.status_text.set_text(f'狀態: {self.connection_status}', color=status_color)
+        rssi_text = f'WiFi: MCU={self.mcu_rssi}dBm | PC={self.pc_rssi}dBm'
+        self.status_text.set_text(f'Status: {self.connection_status} | {rssi_text}', color=status_color)
 
         m1_text = f'M1: T={self.status_m1["temp"]}°C | I={self.status_m1["current"]:.2f}A | S={self.status_m1["speed"]}dps | A={self.status_m1["angle"]:.2f}°'
         m2_text = f'M2: T={self.status_m2["temp"]}°C | I={self.status_m2["current"]:.2f}A | S={self.status_m2["speed"]}dps | A={self.status_m2["angle"]:.2f}°'
         self.data_text.set_text(f'{m1_text}\n{m2_text}')
 
-        return (self.line_m1_temp, self.line_m1_current, self.line_m1_speed,
+        return (self.line_mcu_rssi, self.line_pc_rssi,
+                self.line_m1_temp, self.line_m1_current, self.line_m1_speed,
                 self.line_m1_accel, self.line_m1_angle,
                 self.line_m2_temp, self.line_m2_current, self.line_m2_speed,
                 self.line_m2_accel, self.line_m2_angle,
                 self.status_text, self.data_text)
 
     def run(self):
-        """啟動GUI"""
+        """Start GUI"""
         if not self.connect():
-            print("連接失敗. 結束...")
+            print("Connection failed. Exiting...")
             return
 
         self.running = True
 
-        # 啟動資料讀取執行緒
+        # Start data reading thread
         read_thread = threading.Thread(target=self.read_data, daemon=True)
         read_thread.start()
 
-        # 設定matplotlib圖表
+        # Setup matplotlib plots
         self.fig = plt.figure(figsize=(16, 10))
-        self.fig.suptitle('ExoPulse WiFi 雙馬達監控系統', fontsize=16, fontweight='bold')
+        self.fig.suptitle('ExoPulse WiFi Dual Motor Monitor', fontsize=16, fontweight='bold')
 
-        gs = gridspec.GridSpec(6, 2, figure=self.fig, hspace=0.4, wspace=0.3)
+        gs = gridspec.GridSpec(7, 2, figure=self.fig, hspace=0.4, wspace=0.3)
 
-        # Motor 1 圖表 (左欄)
-        self.ax_m1_temp = self.fig.add_subplot(gs[0, 0])
-        self.ax_m1_current = self.fig.add_subplot(gs[1, 0])
-        self.ax_m1_speed = self.fig.add_subplot(gs[2, 0])
-        self.ax_m1_accel = self.fig.add_subplot(gs[3, 0])
-        self.ax_m1_angle = self.fig.add_subplot(gs[4, 0])
+        # WiFi signal strength plot (top row spanning both columns)
+        self.ax_rssi = self.fig.add_subplot(gs[0, :])
 
-        # Motor 2 圖表 (右欄)
-        self.ax_m2_temp = self.fig.add_subplot(gs[0, 1])
-        self.ax_m2_current = self.fig.add_subplot(gs[1, 1])
-        self.ax_m2_speed = self.fig.add_subplot(gs[2, 1])
-        self.ax_m2_accel = self.fig.add_subplot(gs[3, 1])
-        self.ax_m2_angle = self.fig.add_subplot(gs[4, 1])
+        # Motor 1 plots (left column)
+        self.ax_m1_temp = self.fig.add_subplot(gs[1, 0])
+        self.ax_m1_current = self.fig.add_subplot(gs[2, 0])
+        self.ax_m1_speed = self.fig.add_subplot(gs[3, 0])
+        self.ax_m1_accel = self.fig.add_subplot(gs[4, 0])
+        self.ax_m1_angle = self.fig.add_subplot(gs[5, 0])
 
-        # 初始化線條
+        # Motor 2 plots (right column)
+        self.ax_m2_temp = self.fig.add_subplot(gs[1, 1])
+        self.ax_m2_current = self.fig.add_subplot(gs[2, 1])
+        self.ax_m2_speed = self.fig.add_subplot(gs[3, 1])
+        self.ax_m2_accel = self.fig.add_subplot(gs[4, 1])
+        self.ax_m2_angle = self.fig.add_subplot(gs[5, 1])
+
+        # Initialize RSSI lines
+        self.line_mcu_rssi, = self.ax_rssi.plot([], [], 'b-', label='MCU→Hotspot', linewidth=2)
+        self.line_pc_rssi, = self.ax_rssi.plot([], [], 'g-', label='PC→Hotspot', linewidth=2)
+        self.ax_rssi.set_title('WiFi Signal Strength (RSSI)', fontsize=11, fontweight='bold')
+        self.ax_rssi.set_xlabel('Time (s)', fontsize=8)
+        self.ax_rssi.set_ylabel('dBm', fontsize=8)
+        self.ax_rssi.set_ylim(-100, -20)
+        self.ax_rssi.grid(True, alpha=0.3)
+        self.ax_rssi.legend(loc='upper right')
+
+        # Initialize lines
         self.line_m1_temp, = self.ax_m1_temp.plot([], [], 'r-', label='Motor 1')
         self.line_m1_current, = self.ax_m1_current.plot([], [], 'b-')
         self.line_m1_speed, = self.ax_m1_speed.plot([], [], 'g-')
@@ -354,40 +417,40 @@ class WiFiMotorMonitor:
         self.line_m2_accel, = self.ax_m2_accel.plot([], [], 'm-')
         self.line_m2_angle, = self.ax_m2_angle.plot([], [], 'c-')
 
-        # 設定標籤
-        for ax, title in [(self.ax_m1_temp, '溫度 (°C)'),
-                          (self.ax_m1_current, '電流 (A)'),
-                          (self.ax_m1_speed, '速度 (dps)'),
-                          (self.ax_m1_accel, '加速度 (dps²)'),
-                          (self.ax_m1_angle, '角度 (°)'),
-                          (self.ax_m2_temp, '溫度 (°C)'),
-                          (self.ax_m2_current, '電流 (A)'),
-                          (self.ax_m2_speed, '速度 (dps)'),
-                          (self.ax_m2_accel, '加速度 (dps²)'),
-                          (self.ax_m2_angle, '角度 (°)')]:
+        # Set labels
+        for ax, title in [(self.ax_m1_temp, 'Temperature (C)'),
+                          (self.ax_m1_current, 'Current (A)'),
+                          (self.ax_m1_speed, 'Speed (dps)'),
+                          (self.ax_m1_accel, 'Acceleration (dps^2)'),
+                          (self.ax_m1_angle, 'Angle (deg)'),
+                          (self.ax_m2_temp, 'Temperature (C)'),
+                          (self.ax_m2_current, 'Current (A)'),
+                          (self.ax_m2_speed, 'Speed (dps)'),
+                          (self.ax_m2_accel, 'Acceleration (dps^2)'),
+                          (self.ax_m2_angle, 'Angle (deg)')]:
             ax.set_title(title, fontsize=10)
-            ax.set_xlabel('時間 (s)', fontsize=8)
+            ax.set_xlabel('Time (s)', fontsize=8)
             ax.grid(True, alpha=0.3)
 
-        # 狀態與控制區域
-        ax_status = self.fig.add_subplot(gs[5, :])
+        # Status and control area
+        ax_status = self.fig.add_subplot(gs[6, :])
         ax_status.axis('off')
 
-        self.status_text = ax_status.text(0.02, 0.8, '狀態: 連接中...', fontsize=12, verticalalignment='top')
+        self.status_text = ax_status.text(0.02, 0.8, 'Status: Connecting...', fontsize=12, verticalalignment='top')
         self.data_text = ax_status.text(0.02, 0.5, '', fontsize=10, verticalalignment='top', family='monospace')
 
-        # 新增按鈕
+        # Add buttons
         ax_cal1 = plt.axes([0.1, 0.02, 0.1, 0.03])
         ax_cal2 = plt.axes([0.22, 0.02, 0.1, 0.03])
         ax_both = plt.axes([0.34, 0.02, 0.12, 0.03])
         ax_clear = plt.axes([0.48, 0.02, 0.12, 0.03])
         ax_status_btn = plt.axes([0.62, 0.02, 0.1, 0.03])
 
-        btn_cal1 = Button(ax_cal1, '校正 M1')
-        btn_cal2 = Button(ax_cal2, '校正 M2')
-        btn_both = Button(ax_both, '校正兩者')
-        btn_clear = Button(ax_clear, '清除校正')
-        btn_status = Button(ax_status_btn, '狀態')
+        btn_cal1 = Button(ax_cal1, 'Cal M1')
+        btn_cal2 = Button(ax_cal2, 'Cal M2')
+        btn_both = Button(ax_both, 'Cal Both')
+        btn_clear = Button(ax_clear, 'Clear Cal')
+        btn_status = Button(ax_status_btn, 'Status')
 
         btn_cal1.on_clicked(self.calibrate_motor1)
         btn_cal2.on_clicked(self.calibrate_motor2)
@@ -395,7 +458,7 @@ class WiFiMotorMonitor:
         btn_clear.on_clicked(self.clear_calibration)
         btn_status.on_clicked(self.request_status)
 
-        # 動畫
+        # Animation
         ani = FuncAnimation(self.fig, self.update_plot, interval=100, blit=True)
 
         plt.show()
@@ -405,15 +468,15 @@ class WiFiMotorMonitor:
             self.sock.close()
 
 if __name__ == '__main__':
-    print("ExoPulse WiFi 雙馬達監控系統")
+    print("ExoPulse WiFi Dual Motor Monitoring System")
     print("=" * 50)
 
-    # 從命令列取得ESP32 IP或使用預設值
+    # Get ESP32 IP from command line or use default
     host = sys.argv[1] if len(sys.argv) > 1 else '192.168.43.123'
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 8888
 
-    print(f"目標: {host}:{port}")
-    print("請確認ESP32已連接到WiFi 'ExoPulse'")
+    print(f"Target: {host}:{port}")
+    print("Please ensure ESP32 is connected to WiFi 'ExoPulse'")
     print("=" * 50)
 
     monitor = WiFiMotorMonitor(host=host, port=port)

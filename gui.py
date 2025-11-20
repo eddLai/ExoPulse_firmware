@@ -239,16 +239,7 @@ class ExoPulseUnifiedGUI(QMainWindow):
             # Always available - Main control (now with integrated monitoring)
             ("motor_control", "Motor Control & Monitor", "Integrated motor control and monitoring interface", None, False, False),
 
-            # High-level monitoring tools
-            ("dual_motor_plotter", "Dual Motor Plotter", "Real-time dual motor visualization (CAN only)", "dual_motor_plotter.py", True, False),
-            ("can_plotter", "CAN Plotter", "CAN bus data visualization", "can_plotter.py", True, False),
-
-            # WiFi tools
-            ("wifi_monitor", "WiFi Monitor", "WiFi-based remote monitoring", "wifi_monitor.py", False, True),
-            ("wifi_dual_motor_plotter", "WiFi Dual Motor Plot", "WiFi dual motor plotter", "wifi_dual_motor_plotter.py", False, True),
-
             # Independent tools
-            ("serial_reader", "Serial Reader", "Simple serial port data reader", "serial_reader.py", False, False),
             ("emg_plotter", "EMG Plotter", "EMG signal visualization", "emg_plotter.py", False, False),
         ]
 
@@ -385,25 +376,7 @@ class ExoPulseUnifiedGUI(QMainWindow):
 
             # Add section headers
             if idx == 1:
-                section_label = QLabel("CAN Monitoring Tools")
-                section_label.setStyleSheet("""
-                    color: #5DADE2;
-                    font-weight: bold;
-                    font-size: 10pt;
-                    padding: 15px 20px 5px 20px;
-                """)
-                scroll_layout.addWidget(section_label)
-            elif idx == 3:
-                section_label = QLabel("WiFi Tools")
-                section_label.setStyleSheet("""
-                    color: #5DADE2;
-                    font-weight: bold;
-                    font-size: 10pt;
-                    padding: 15px 20px 5px 20px;
-                """)
-                scroll_layout.addWidget(section_label)
-            elif idx == 5:
-                section_label = QLabel("General Tools")
+                section_label = QLabel("Additional Tools")
                 section_label.setStyleSheet("""
                     color: #5DADE2;
                     font-weight: bold;

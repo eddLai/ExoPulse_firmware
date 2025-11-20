@@ -23,6 +23,7 @@ import sys
 import re
 from datetime import datetime
 from collections import deque
+from pathlib import Path
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -200,6 +201,11 @@ class ExoPulseGUI(QMainWindow):
         # IMU 3D window (initially None, created on demand)
         self.imu_window = None
 
+        # Debug windows
+        self.serial_reader_window = None
+        self.wifi_monitor_window = None
+        self.can_plotter_window = None
+
         # Motor mode (CAN or Lower)
         self.motor_mode = "can"  # Default to CAN
 
@@ -251,12 +257,15 @@ class ExoPulseGUI(QMainWindow):
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
 
-        # Log display
+        # Log display (initially hidden)
+        self.log_label = QLabel("System Log:")
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setMaximumHeight(150)
         self.log_text.setStyleSheet("font-family: Consolas; font-size: 9pt;")
-        right_layout.addWidget(QLabel("System Log:"))
+        self.log_label.setVisible(False)
+        self.log_text.setVisible(False)
+        right_layout.addWidget(self.log_label)
         right_layout.addWidget(self.log_text)
 
         # Plot area (placeholder)
@@ -271,6 +280,44 @@ class ExoPulseGUI(QMainWindow):
 
         layout = QVBoxLayout(central_widget)
         layout.addWidget(main_splitter)
+
+        # Status bar with Debug Tools button
+        status_bar = QWidget()
+        status_bar.setFixedHeight(28)
+        status_bar.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #1a252f, stop:1 #2C3E50);
+                border-top: 1px solid #34495E;
+            }
+        """)
+        status_layout = QHBoxLayout(status_bar)
+        status_layout.setContentsMargins(10, 3, 10, 3)
+        
+        status_layout.addStretch()
+        
+        # Debug Tools button
+        self.debug_btn = QPushButton("🔧 Debug Tools")
+        self.debug_btn.setFixedHeight(22)
+        self.debug_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #7F8C8D, stop:1 #566573);
+                color: white;
+                border: none;
+                border-radius: 3px;
+                padding: 3px 12px;
+                font-size: 9pt;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #95A5A6, stop:1 #7F8C8D);
+            }
+        """)
+        self.debug_btn.clicked.connect(self._show_debug_menu)
+        status_layout.addWidget(self.debug_btn)
+        
+        layout.addWidget(status_bar)
 
         # Initialize plots
         self._rebuild_plots()
@@ -414,6 +461,16 @@ class ExoPulseGUI(QMainWindow):
         self.check_angle.stateChanged.connect(self._on_display_change)
         display_layout.addWidget(self.check_angle)
 
+        display_layout.addWidget(QLabel(""))  # Separator
+        self.check_log = QCheckBox("System Log")
+        self.check_log.setChecked(False)  # Default: hidden
+        self.check_log.stateChanged.connect(self._on_log_display_change)
+        display_layout.addWidget(self.check_log)
+
+        self.btn_imu = QPushButton("Show IMU Window")
+        self.btn_imu.clicked.connect(self._toggle_imu_window)
+        display_layout.addWidget(self.btn_imu)
+
         display_group.setLayout(display_layout)
         scroll_layout.addWidget(display_group)
 
@@ -436,10 +493,6 @@ class ExoPulseGUI(QMainWindow):
         self.btn_record = QPushButton("Start Record")
         self.btn_record.clicked.connect(self._toggle_record)
         action_layout.addWidget(self.btn_record)
-
-        self.btn_imu = QPushButton("Show IMU")
-        self.btn_imu.clicked.connect(self._toggle_imu_window)
-        action_layout.addWidget(self.btn_imu)
 
         action_group.setLayout(action_layout)
         scroll_layout.addWidget(action_group)
@@ -483,6 +536,12 @@ class ExoPulseGUI(QMainWindow):
 
         self._rebuild_plots()
 
+    def _on_log_display_change(self):
+        """Toggle system log visibility"""
+        visible = self.check_log.isChecked()
+        self.log_label.setVisible(visible)
+        self.log_text.setVisible(visible)
+
     def _rebuild_plots(self):
         """Rebuild plots based on visible options"""
         # Clear existing plot
@@ -513,14 +572,14 @@ class ExoPulseGUI(QMainWindow):
         row = 0
 
         plot_configs = [
-            ('temp', 'Temperature', '°C', (0, 80), 'cyan', 'orange'),
-            ('current', 'Current', 'A', (-1, 1), 'cyan', 'orange'),
-            ('speed', 'Speed', 'rad/s', (-0.35, 0.35), 'cyan', 'orange'),
-            ('acceleration', 'Acceleration', 'dps²', (-200, 200), 'cyan', 'orange'),
-            ('angle', 'Angle', '°', (-180, 180), 'cyan', 'orange'),
+            ('temp', 'Temperature', '°C', 'cyan', 'orange'),
+            ('current', 'Current', 'A', 'cyan', 'orange'),
+            ('speed', 'Speed', 'rad/s', 'cyan', 'orange'),
+            ('acceleration', 'Acceleration', 'dps²', 'cyan', 'orange'),
+            ('angle', 'Angle', '°', 'cyan', 'orange'),
         ]
 
-        for key, title, ylabel, ylim, color1, color2 in plot_configs:
+        for key, title, ylabel, color1, color2 in plot_configs:
             if not self.visible_plots[key]:
                 continue
 
@@ -528,7 +587,7 @@ class ExoPulseGUI(QMainWindow):
             ax1 = self.fig.add_subplot(gs[row, 0])
             ax1.set_title(f'Motor 1 - {title}', color=color1, fontweight='bold')
             ax1.set_ylabel(ylabel, color=color1)
-            ax1.set_ylim(*ylim)
+            ax1.set_autoscale_on(True)  # Enable autoscale
             ax1.grid(True, alpha=0.3)
             line1, = ax1.plot([], [], color=color1, lw=2)
 
@@ -539,7 +598,7 @@ class ExoPulseGUI(QMainWindow):
             ax2 = self.fig.add_subplot(gs[row, 1])
             ax2.set_title(f'Motor 2 - {title}', color=color2, fontweight='bold')
             ax2.set_ylabel(ylabel, color=color2)
-            ax2.set_ylim(*ylim)
+            ax2.set_autoscale_on(True)  # Enable autoscale
             ax2.grid(True, alpha=0.3)
             line2, = ax2.plot([], [], color=color2, lw=2)
 
@@ -596,12 +655,20 @@ class ExoPulseGUI(QMainWindow):
                     ax = self.axes[line_key]
                     ax.set_xlim(max(0, t[-1] - window_size), t[-1] + 1)
 
-                    # Auto-scale y-axis for angle and acceleration
-                    if key in ['angle', 'acceleration'] and len(values) > 0:
+                    # Auto-scale y-axis for ALL data types based on actual values
+                    if len(values) > 0:
                         val_min, val_max = min(values), max(values)
-                        if val_max - val_min > 0:
-                            margin = (val_max - val_min) * 0.2 + 5
+                        val_range = val_max - val_min
+                        
+                        # Only auto-scale if there's significant variation
+                        if val_range > 0.01:
+                            margin = val_range * 0.2 + (5 if key in ['angle', 'acceleration'] else 0.1)
                             ax.set_ylim(val_min - margin, val_max + margin)
+                        else:
+                            # For stable values, show small range around the value
+                            center = (val_min + val_max) / 2
+                            offset = 1 if key in ['angle', 'acceleration'] else 0.1
+                            ax.set_ylim(center - offset, center + offset)
 
         # Update status text
         self.frame_count += 1
@@ -634,6 +701,12 @@ class ExoPulseGUI(QMainWindow):
             self._log("🔧 Motor mode: Lower Chip")
 
     # ========== Calibration (CAN motors) ==========
+    def _auto_calibrate(self):
+        """Auto-calibrate both motors after connection"""
+        time.sleep(0.5)  # Wait for connection to stabilize
+        self._log("⚙️ Auto-calibrating motors...")
+        self._calibrate_motor(0)  # Calibrate both motors
+
     def _calibrate_motor(self, motor_id):
         """Calibrate motor zero position"""
         try:
@@ -672,6 +745,87 @@ class ExoPulseGUI(QMainWindow):
         except Exception as e:
             self._log(f"✗ Clear failed: {e}")
 
+    # ========== Debug Tools Menu ==========
+    def _show_debug_menu(self):
+        """Show debug tools menu in center"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QPushButton, QLabel
+        from PySide6.QtCore import Qt
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Debug Tools")
+        dialog.setModal(True)
+        dialog.setFixedSize(300, 200)
+        dialog.setStyleSheet("""
+            QDialog {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #2C3E50, stop:1 #34495E);
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #3498DB, stop:1 #2980B9);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 10px;
+                font-size: 11pt;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #5DADE2, stop:1 #3498DB);
+            }
+            QLabel {
+                color: #ECF0F1;
+                font-size: 12pt;
+                font-weight: bold;
+            }
+        """)
+        
+        layout = QVBoxLayout()
+        layout.setSpacing(10)
+        
+        title = QLabel("Select Debug Tool:")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        
+        # Serial Plotter
+        btn_serial_plot = QPushButton("📊  Serial Plotter")
+        btn_serial_plot.clicked.connect(lambda: (self._launch_serial_plotter(), dialog.accept()))
+        layout.addWidget(btn_serial_plot)
+        
+        # WiFi Monitor
+        btn_wifi = QPushButton("📶  WiFi Monitor")
+        btn_wifi.clicked.connect(lambda: (self._launch_wifi_monitor(), dialog.accept()))
+        layout.addWidget(btn_wifi)
+        
+        dialog.setLayout(layout)
+        dialog.exec()
+
+    def _launch_serial_plotter(self):
+        """Launch Serial Plotter with current communication settings"""
+        import subprocess
+        port = self.combo_com.currentText() if hasattr(self, 'combo_com') else '/dev/ttyACM0'
+        script = Path(__file__).parent / 'serial_plotter.py'
+        if script.exists():
+            # Launch in new terminal window
+            subprocess.Popen(['x-terminal-emulator', '-e', sys.executable, str(script), '--port', port],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            QMessageBox.warning(self, "Error", "serial_plotter.py not found")
+
+    def _launch_wifi_monitor(self):
+        """Launch WiFi Monitor"""
+        import subprocess
+        script = Path(__file__).parent / 'wifi_monitor.py'
+        if script.exists():
+            # Launch in new window with ESP32 IP (GUI app)
+            # Use configured WiFi settings or default
+            esp32_ip = "10.154.48.200"  # From ESP32_IP constant
+            port = "8888"
+            subprocess.Popen([sys.executable, str(script), esp32_ip, port])
+        else:
+            QMessageBox.warning(self, "Error", "wifi_monitor.py not found")
+
     # ========== IMU Window ==========
     def _toggle_imu_window(self):
         """Show/hide IMU window"""
@@ -702,6 +856,9 @@ class ExoPulseGUI(QMainWindow):
         """Handle TCP connection"""
         self.tcp_sock = sock
         self._log(f"✓ TCP connected to {ESP32_IP}:{ESP32_PORT}")
+        # Auto-calibrate after connection
+        if self.motor_mode == "can":
+            threading.Thread(target=self._auto_calibrate, daemon=True).start()
 
     def _start_udp_listener(self):
         """Start UDP listener"""
@@ -767,6 +924,9 @@ class ExoPulseGUI(QMainWindow):
                 self.ser = serial.Serial(port, 115200, timeout=0.1)
                 self.connection_status = "Connected"
                 self.data_queue.put(("log", f"✓ UART on {port}"))
+                # Auto-calibrate after connection
+                if self.motor_mode == "can":
+                    self.data_queue.put(("auto_calibrate", None))
 
                 while not self.stop_uart_evt.is_set():
                     line = self.ser.readline().decode(errors="ignore").strip()
@@ -872,6 +1032,8 @@ class ExoPulseGUI(QMainWindow):
 
             elif msg_type == "tcp_ready":
                 self._tcp_ready(msg)
+            elif msg_type == "auto_calibrate":
+                self._auto_calibrate()
 
         # Update IMU if visible
         if self.imu_window and self.imu_window.isVisible():
