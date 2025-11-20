@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QRadioButton, QComboBox,
     QTextEdit, QGroupBox, QMessageBox, QButtonGroup, QCheckBox,
-    QSplitter, QScrollArea
+    QSplitter, QScrollArea, QSpinBox
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 
@@ -229,7 +229,10 @@ class ExoPulseGUI(QMainWindow):
 
         # Filter initial unstable data (skip first N packets per motor)
         self.packets_received = {1: 0, 2: 0}  # Track packets per motor
-        self.skip_initial_packets = 5  # Skip first 5 packets to filter startup glitches
+        self.skip_initial_packets = 10  # Skip first 10 packets to filter startup glitches
+
+        # X-axis time window for plots (seconds)
+        self.plot_time_window = 10  # Default: 10 seconds
 
         # Build UI
         self.setWindowTitle("ExoPulse Enhanced Controller")
@@ -296,9 +299,42 @@ class ExoPulseGUI(QMainWindow):
         """)
         status_layout = QHBoxLayout(status_bar)
         status_layout.setContentsMargins(10, 3, 10, 3)
-        
+
+        # X-axis time window control
+        time_window_label = QLabel("Time Window:")
+        time_window_label.setStyleSheet("color: #ECF0F1; font-size: 9pt;")
+        status_layout.addWidget(time_window_label)
+
+        self.time_window_spinbox = QSpinBox()
+        self.time_window_spinbox.setMinimum(5)
+        self.time_window_spinbox.setMaximum(60)
+        self.time_window_spinbox.setValue(10)
+        self.time_window_spinbox.setSuffix(" s")
+        self.time_window_spinbox.setFixedWidth(70)
+        self.time_window_spinbox.setFixedHeight(22)
+        self.time_window_spinbox.setStyleSheet("""
+            QSpinBox {
+                background-color: #34495E;
+                color: #ECF0F1;
+                border: 1px solid #566573;
+                border-radius: 3px;
+                padding: 2px 5px;
+                font-size: 9pt;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                background-color: #566573;
+                border: none;
+                width: 16px;
+            }
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+                background-color: #7F8C8D;
+            }
+        """)
+        self.time_window_spinbox.valueChanged.connect(self._on_time_window_change)
+        status_layout.addWidget(self.time_window_spinbox)
+
         status_layout.addStretch()
-        
+
         # Debug Tools button
         self.debug_btn = QPushButton("🔧 Debug Tools")
         self.debug_btn.setFixedHeight(22)
@@ -470,12 +506,8 @@ class ExoPulseGUI(QMainWindow):
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #5DADE2, stop:1 #3498DB);
             }
-            QPushButton:disabled {
-                background-color: #7F8C8D;
-                color: #BDC3C7;
-            }
         """)
-        self.btn_wifi_config.clicked.connect(self._test_and_switch_wifi)
+        self.btn_wifi_config.clicked.connect(self._launch_wifi_config)
         comm_layout.addWidget(self.btn_wifi_config)
 
         comm_group.setLayout(comm_layout)
@@ -592,6 +624,10 @@ class ExoPulseGUI(QMainWindow):
         self.log_label.setVisible(visible)
         self.log_text.setVisible(visible)
 
+    def _on_time_window_change(self, value):
+        """Handle time window change"""
+        self.plot_time_window = value
+
     def _rebuild_plots(self):
         """Rebuild plots based on visible options"""
         # Clear existing plot
@@ -676,7 +712,8 @@ class ExoPulseGUI(QMainWindow):
 
     def _update_plots(self, frame):
         """Update all visible plots"""
-        window_size = 30  # seconds
+        # Use dynamic time window from spinbox
+        window_size = self.plot_time_window
 
         for motor_id in [1, 2]:
             data = self.motor_data[motor_id]
@@ -701,7 +738,7 @@ class ExoPulseGUI(QMainWindow):
 
                     self.lines[line_key].set_data(t, values)
 
-                    # Update x-axis
+                    # Update x-axis with dynamic time window
                     ax = self.axes[line_key]
                     ax.set_xlim(max(0, t[-1] - window_size), t[-1] + 1)
 
@@ -863,8 +900,19 @@ class ExoPulseGUI(QMainWindow):
         else:
             QMessageBox.warning(self, "Error", "serial_plotter.py not found")
 
-    def _launch_wifi_monitor(self):
+    def _launch_wifi_config(self):
         """Launch WiFi Configuration and Monitor"""
+        import subprocess
+        script = Path(__file__).parent / 'auto_wifi_setup.py'
+        if script.exists():
+            # Launch WiFi configuration tool (GUI app)
+            subprocess.Popen([sys.executable, str(script)])
+            self._log("📡 Launching WiFi Configuration...")
+        else:
+            QMessageBox.warning(self, "Error", "auto_wifi_setup.py not found")
+
+    def _launch_wifi_monitor(self):
+        """Launch WiFi Configuration and Monitor (from Debug Tools)"""
         import subprocess
         script = Path(__file__).parent / 'auto_wifi_setup.py'
         if script.exists():
@@ -1105,10 +1153,6 @@ class ExoPulseGUI(QMainWindow):
                 self._tcp_ready(msg)
             elif msg_type == "auto_calibrate":
                 self._auto_calibrate()
-            elif msg_type == "wifi_test_success":
-                self._wifi_test_success()
-            elif msg_type == "wifi_test_failed":
-                self._wifi_test_failed(msg)
 
         # Update IMU if visible
         if self.imu_window and self.imu_window.isVisible():
@@ -1231,117 +1275,6 @@ class ExoPulseGUI(QMainWindow):
             except Exception as exc:
                 self._log(f"⚠ Save error: {exc}")
             self.btn_record.setText("Start Record")
-
-    def _test_and_switch_wifi(self):
-        """Test WiFi connection and switch to WiFi mode if successful"""
-        self.btn_wifi_config.setEnabled(False)
-        self.btn_wifi_config.setText("Testing WiFi...")
-        self._log("🔍 Testing WiFi connection...")
-        
-        def test_worker():
-            try:
-                # Test TCP connection
-                test_sock = socket.create_connection((ESP32_IP, ESP32_PORT), timeout=3)
-                test_sock.close()
-                self.data_queue.put(("wifi_test_success", None))
-            except Exception as exc:
-                self.data_queue.put(("wifi_test_failed", str(exc)))
-        
-        threading.Thread(target=test_worker, daemon=True).start()
-    
-    def _wifi_test_success(self):
-        """Handle successful WiFi test - switch to WiFi mode"""
-        # Stop UART
-        self.stop_uart_evt.set()
-        if self.ser and self.ser.is_open:
-            try:
-                self.ser.close()
-            except:
-                pass
-        
-        # Switch to WiFi mode
-        self.current_mode = "wifi"
-        self.stop_udp_evt.clear()
-        self.comm_status_label.setText("WiFi")
-        self.comm_status_label.setStyleSheet("""
-            QLabel {
-                background-color: #27AE60;
-                color: white;
-                padding: 5px 10px;
-                border-radius: 3px;
-                font-weight: bold;
-            }
-        """)
-        self.comm_info_label.setText(f"{ESP32_IP}:{ESP32_PORT}")
-        
-        self._log(f"✓ WiFi test successful - switched to WiFi mode")
-        self._log(f"✓ Connected to {ESP32_IP}:{ESP32_PORT}")
-        
-        # Start WiFi connections
-        self._connect_tcp_async()
-        self._start_udp_listener()
-        
-        # Change button to "Back to UART"
-        self.btn_wifi_config.setText("⬅ Back to UART")
-        self.btn_wifi_config.setEnabled(True)
-        self.btn_wifi_config.clicked.disconnect()
-        self.btn_wifi_config.clicked.connect(self._switch_back_to_uart)
-    
-    def _wifi_test_failed(self, error_msg):
-        """Handle failed WiFi test"""
-        self._log(f"✗ WiFi test failed: {error_msg}")
-        self._log("⚠ Staying in UART mode")
-        self.btn_wifi_config.setText("📡 WiFi Configuration")
-        self.btn_wifi_config.setEnabled(True)
-        
-        QMessageBox.warning(
-            self,
-            "WiFi Test Failed",
-            f"Cannot connect to ESP32 at {ESP32_IP}:{ESP32_PORT}\n\n"
-            f"Error: {error_msg}\n\n"
-            "Please check:\n"
-            "1. ESP32 is powered on\n"
-            "2. WiFi is configured correctly\n"
-            "3. IP address is correct\n\n"
-            "Staying in UART mode.",
-            QMessageBox.Ok
-        )
-    
-    def _switch_back_to_uart(self):
-        """Switch back from WiFi to UART mode"""
-        # Stop WiFi connections
-        self.stop_udp_evt.set()
-        if self.tcp_sock:
-            try:
-                self.tcp_sock.close()
-            except:
-                pass
-            self.tcp_sock = None
-        
-        # Switch to UART mode
-        self.current_mode = "uart"
-        self.stop_uart_evt.clear()
-        self.comm_status_label.setText("UART")
-        self.comm_status_label.setStyleSheet("""
-            QLabel {
-                background-color: #2C3E50;
-                color: #ECF0F1;
-                padding: 5px 10px;
-                border-radius: 3px;
-                font-weight: bold;
-            }
-        """)
-        self.comm_info_label.setText("--")
-        
-        self._log("🔁 Switched back to UART mode")
-        
-        # Start UART
-        self._start_uart_listener()
-        
-        # Change button back to WiFi Config
-        self.btn_wifi_config.setText("📡 WiFi Configuration")
-        self.btn_wifi_config.clicked.disconnect()
-        self.btn_wifi_config.clicked.connect(self._test_and_switch_wifi)
 
     def closeEvent(self, event):
         """Handle close"""
