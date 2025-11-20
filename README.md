@@ -60,17 +60,19 @@ pio device monitor --baud 115200
 
 ### 3. Run User Interface
 
-**Quick Launch (Recommended)**
+**Unified GUI Launcher (Recommended)**
 ```bash
-# Interactive menu to select GUI
+# Launch the unified control panel with sidebar navigation
 python3 gui.py
-
-# Or launch specific GUI directly
-python3 gui.py 3    # Motor Monitor (advanced)
-python3 gui.py 4    # Dual Motor Plotter
 ```
 
-**Direct Launch**
+The unified GUI provides:
+- 🎨 **Smooth sidebar navigation** - Easy switching between all components
+- 🚀 **Integrated launcher** - Start/stop components with one click
+- 📊 **Real-time process monitoring** - View component output logs
+- 📁 **Component organization** - Clear separation of low-level and high-level tools
+
+**Direct Component Launch**
 ```bash
 # Low-level: Basic motor control
 python3 UI_components/motor_control.py
@@ -85,7 +87,7 @@ See [UI_components/README.md](UI_components/README.md) for detailed UI documenta
 
 ```
 ExoPulse_firmware/
-├── gui.py                          # GUI launcher (entry point)
+├── gui.py                          # Unified GUI launcher with sidebar (entry point)
 ├── src/ -> MGv2/src/               # Symlink to firmware source
 ├── MGv2/                           # MGv2 motor driver firmware
 │   ├── src/
