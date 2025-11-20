@@ -30,10 +30,14 @@ QueueHandle_t motorDataQueue;
 SemaphoreHandle_t canMutex;
 TaskHandle_t canReadTaskHandle;
 TaskHandle_t serialOutputTaskHandle;
+TaskHandle_t wifiManagementTaskHandle;
 
 // Software angle offset (safe, no ROM write)
 int64_t motor1_angle_offset = 0;
 int64_t motor2_angle_offset = 0;
+
+// Output mode control (default: Serial)
+volatile OutputMode currentOutputMode = MODE_SERIAL;
 
 // Latest motor status (for calibration commands)
 volatile int64_t motor1_latest_angle = 0;
@@ -80,7 +84,7 @@ void serialOutputTask(void *parameter) {
     uint32_t outputCount2 = 0;
 
     while (true) {
-        // Check for serial commands (non-blocking)
+        // Check for serial commands (ALWAYS active, regardless of output mode)
         if (Serial.available() > 0) {
             String cmd = Serial.readStringUntil('\n');
             cmd.trim();
@@ -92,7 +96,7 @@ void serialOutputTask(void *parameter) {
             // Get appropriate offset
             int64_t offset = (status.motorID == MOTOR_ID_1) ? motor1_angle_offset : motor2_angle_offset;
 
-            // Output in compact format for GUI parsing
+            // Output motor data based on current mode (Serial/WiFi/Both)
             printMotorData(status, offset);
 
             // Track output counts per motor
@@ -103,11 +107,29 @@ void serialOutputTask(void *parameter) {
             }
 
             // Print detailed status every 10 reads per motor (1 second at 10Hz)
+            // Note: Detailed status always goes to Serial only (for debugging)
             if ((status.motorID == MOTOR_ID_1 && outputCount1 % 10 == 0) ||
                 (status.motorID == MOTOR_ID_2 && outputCount2 % 10 == 0)) {
-                printDetailedStatus(status, offset);
+                if (currentOutputMode == MODE_SERIAL || currentOutputMode == MODE_BOTH) {
+                    printDetailedStatus(status, offset);
+                }
             }
         }
+    }
+}
+
+// WiFi Management Task (Low Priority) - Runs on Core 0
+// Handles WiFi connection, TCP server, and client management
+void wifiManagementTask(void *parameter) {
+    while (true) {
+        // Handle client connections (check for new clients, disconnections)
+        WiFiPairing::handleClientConnection();
+
+        // Check WiFi connection status and reconnect if needed
+        WiFiPairing::checkConnection();
+
+        // Wait 500ms before next check
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
@@ -118,7 +140,7 @@ void setup() {
     Serial.println("\n========================================");
     Serial.println("   LK-TECH Dual Motor Status Reader");
     Serial.println("   FreeRTOS Optimized - 10Hz");
-    Serial.println("   Modularized Version");
+    Serial.println("   WiFi Pairing Enabled");
     Serial.println("========================================\n");
 
     pinMode(LED_PIN, OUTPUT);
@@ -196,8 +218,19 @@ void setup() {
         "Serial_Output",
         4096,
         NULL,
-        1,
+        2,
         &serialOutputTaskHandle,
+        0
+    );
+
+    // Create WiFi management task (low priority, core 0)
+    xTaskCreatePinnedToCore(
+        wifiManagementTask,
+        "WiFi_Mgmt",
+        8192,  // Larger stack for WiFi operations
+        NULL,
+        1,
+        &wifiManagementTaskHandle,
         0
     );
 

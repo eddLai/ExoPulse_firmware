@@ -50,6 +50,14 @@ class WiFiMotorMonitor:
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
 
+        # WiFi pairing status tracking
+        self.esp32_wifi_ssid = "Unknown"
+        self.esp32_wifi_ip = "Unknown"
+        self.esp32_connected_to_wifi = False
+        self.pc_wifi_ssid = "Unknown"
+        self.pc_wifi_ip = "Unknown"
+        self.wifi_pairing_matched = False
+
         # Motor 1 data
         self.data_m1 = {
             'time': deque(maxlen=max_points),
@@ -100,6 +108,31 @@ class WiFiMotorMonitor:
             pass
         return 0
 
+    def get_pc_wifi_details(self):
+        """Get PC WiFi connection details (SSID and IP)"""
+        try:
+            import subprocess
+            # Get SSID from iwconfig
+            result = subprocess.run(['iwconfig'], capture_output=True, text=True, timeout=1)
+            for line in result.stdout.split('\n'):
+                if 'ESSID:' in line:
+                    match = re.search(r'ESSID:"([^"]+)"', line)
+                    if match:
+                        self.pc_wifi_ssid = match.group(1)
+                        break
+
+            # Get IP address from hostname -I
+            result = subprocess.run(['hostname', '-I'], capture_output=True, text=True, timeout=1)
+            ips = result.stdout.strip().split()
+            if ips:
+                # Get the first non-localhost IP
+                for ip in ips:
+                    if not ip.startswith('127.'):
+                        self.pc_wifi_ip = ip
+                        break
+        except:
+            pass
+
     def connect(self):
         """Connect to ESP32 WiFi TCP server"""
         try:
@@ -111,8 +144,12 @@ class WiFiMotorMonitor:
             self.connection_status = "Connected"
             self.reconnect_attempts = 0
 
-            # Get PC WiFi signal strength
+            # Get PC WiFi details
             self.pc_rssi = self.get_pc_wifi_rssi()
+            self.get_pc_wifi_details()
+
+            # Store ESP32 IP
+            self.esp32_wifi_ip = self.host
 
             # Read welcome message
             try:
@@ -122,6 +159,7 @@ class WiFiMotorMonitor:
                 pass
 
             print(f"✓ Connected to {self.host}:{self.port}")
+            print(f"   PC WiFi: {self.pc_wifi_ssid} (IP: {self.pc_wifi_ip})")
             return True
         except Exception as e:
             self.connection_status = f"Error: {e}"
@@ -228,6 +266,22 @@ class WiFiMotorMonitor:
                         match = re.search(r'(Signal|RSSI):\s*([-\d]+)', line)
                         if match:
                             self.mcu_rssi = int(match.group(2))
+
+                    # Check for ESP32 WiFi connection info
+                    if 'WiFi Connected' in line or 'Connected to' in line:
+                        self.esp32_connected_to_wifi = True
+                    if 'SSID:' in line:
+                        match = re.search(r'SSID:\s*(\S+)', line)
+                        if match:
+                            self.esp32_wifi_ssid = match.group(1)
+                    if 'IP Address:' in line or 'IP:' in line:
+                        match = re.search(r'IP(?:\s+Address)?:\s*([\d.]+)', line)
+                        if match:
+                            self.esp32_wifi_ip = match.group(1)
+
+                    # Check if WiFi pairing matched
+                    if self.esp32_wifi_ssid != "Unknown" and self.pc_wifi_ssid != "Unknown":
+                        self.wifi_pairing_matched = (self.esp32_wifi_ssid == self.pc_wifi_ssid)
 
                     # Parse motor data
                     data = self.parse_line(line)
@@ -343,10 +397,36 @@ class WiFiMotorMonitor:
             self.ax_m2_angle.relim()
             self.ax_m2_angle.autoscale_view()
 
-        # Update status text
+        # Update status text with WiFi pairing status
         status_color = 'green' if 'Connected' in self.connection_status else 'red'
         rssi_text = f'WiFi: MCU={self.mcu_rssi}dBm | PC={self.pc_rssi}dBm'
-        self.status_text.set_text(f'Status: {self.connection_status} | {rssi_text}', color=status_color)
+        self.status_text.set_text(f'Status: {self.connection_status} | {rssi_text}')
+        self.status_text.set_color(status_color)
+
+        # WiFi pairing status
+        if self.wifi_pairing_matched:
+            pairing_color = 'lime'
+            pairing_icon = '✓'
+            pairing_msg = 'WiFi Matched - Safe to disconnect USB cable'
+        elif self.esp32_connected_to_wifi and self.esp32_wifi_ssid != "Unknown":
+            pairing_color = 'yellow'
+            pairing_icon = '⚠'
+            pairing_msg = f'WiFi Mismatch - ESP32: {self.esp32_wifi_ssid} | PC: {self.pc_wifi_ssid}'
+        else:
+            pairing_color = 'orange'
+            pairing_icon = '⊗'
+            pairing_msg = 'Waiting for ESP32 WiFi connection...'
+
+        self.pairing_text.set_text(f'{pairing_icon} {pairing_msg}')
+        self.pairing_text.set_color(pairing_color)
+        self.pairing_text.set_fontweight('bold')
+
+        # ESP32 and PC WiFi details
+        esp32_info = f'ESP32: SSID={self.esp32_wifi_ssid} | IP={self.esp32_wifi_ip}'
+        pc_info = f'PC: SSID={self.pc_wifi_ssid} | IP={self.pc_wifi_ip}'
+        self.wifi_details_text.set_text(f'{esp32_info}\n{pc_info}')
+        self.wifi_details_text.set_fontsize(9)
+        self.wifi_details_text.set_family('monospace')
 
         m1_text = f'M1: T={self.status_m1["temp"]}°C | I={self.status_m1["current"]:.2f}A | S={self.status_m1["speed"]}dps | A={self.status_m1["angle"]:.2f}°'
         m2_text = f'M2: T={self.status_m2["temp"]}°C | I={self.status_m2["current"]:.2f}A | S={self.status_m2["speed"]}dps | A={self.status_m2["angle"]:.2f}°'
@@ -357,7 +437,7 @@ class WiFiMotorMonitor:
                 self.line_m1_accel, self.line_m1_angle,
                 self.line_m2_temp, self.line_m2_current, self.line_m2_speed,
                 self.line_m2_accel, self.line_m2_angle,
-                self.status_text, self.data_text)
+                self.status_text, self.pairing_text, self.wifi_details_text, self.data_text)
 
     def run(self):
         """Start GUI"""
@@ -436,8 +516,21 @@ class WiFiMotorMonitor:
         ax_status = self.fig.add_subplot(gs[6, :])
         ax_status.axis('off')
 
-        self.status_text = ax_status.text(0.02, 0.8, 'Status: Connecting...', fontsize=12, verticalalignment='top')
-        self.data_text = ax_status.text(0.02, 0.5, '', fontsize=10, verticalalignment='top', family='monospace')
+        # Connection status
+        self.status_text = ax_status.text(0.02, 0.95, 'Status: Connecting...', fontsize=12, verticalalignment='top')
+
+        # WiFi pairing status (prominent)
+        self.pairing_text = ax_status.text(0.02, 0.80, '⊗ Checking WiFi pairing...',
+                                          fontsize=13, verticalalignment='top',
+                                          color='orange', fontweight='bold',
+                                          bbox=dict(boxstyle='round,pad=0.5', facecolor='black', alpha=0.3))
+
+        # WiFi details
+        self.wifi_details_text = ax_status.text(0.02, 0.60, '', fontsize=9,
+                                                verticalalignment='top', family='monospace')
+
+        # Motor data
+        self.data_text = ax_status.text(0.02, 0.35, '', fontsize=10, verticalalignment='top', family='monospace')
 
         # Add buttons
         ax_cal1 = plt.axes([0.1, 0.02, 0.1, 0.03])

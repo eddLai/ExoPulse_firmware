@@ -2,49 +2,75 @@
 #include "motor_protocol.h"
 #include "calibration.h"
 #include "config.h"
+#include "wifi_pairing.h"
 #include <Arduino.h>
 
 /*
  * Serial Command Processing and Output Formatting
  * Handles all serial communication with the user
+ * Supports multiple output modes: Serial, WiFi, or Both
  */
 
-// Print compact motor data for GUI parsing
-void printMotorData(const MotorStatus& status, int64_t offset) {
-    Serial.print("[");
-    Serial.print(status.timestamp);
-    Serial.print("] M:");
-    Serial.print(status.motorID);
-    Serial.print(" T:");
-    Serial.print(status.temperature);
-    Serial.print(" V:");
-    Serial.print(status.voltage * 0.1, 1);
-    Serial.print(" I:");
+// Output mode enumeration
+enum OutputMode {
+    MODE_SERIAL,  // Output to Serial only (default)
+    MODE_WIFI,    // Output to WiFi TCP client only
+    MODE_BOTH     // Output to both Serial and WiFi (debug mode)
+};
+
+// External reference to current output mode (defined in main.cpp)
+extern volatile OutputMode currentOutputMode;
+
+// Format motor data as string
+String formatMotorData(const MotorStatus& status, int64_t offset) {
+    String data = "[";
+    data += status.timestamp;
+    data += "] M:";
+    data += status.motorID;
+    data += " T:";
+    data += status.temperature;
+    data += " V:";
+    data += String(status.voltage * 0.1, 1);
+    data += " I:";
     float actualCurrent = (float)status.torqueCurrent * 33.0 / 2048.0;
-    Serial.print(actualCurrent, 2);
-    Serial.print(" S:");
-    Serial.print(status.speed);
-    Serial.print(" ACC:");
-    Serial.print(status.acceleration);
-    Serial.print(" E:");
-    Serial.print(status.encoder);
-    Serial.print(" A:");
+    data += String(actualCurrent, 2);
+    data += " S:";
+    data += status.speed;
+    data += " ACC:";
+    data += status.acceleration;
+    data += " E:";
+    data += status.encoder;
+    data += " A:";
 
     // Apply software calibration offset
     int64_t correctedAngle = status.motorAngle - offset;
-
-    // Calculate angle in degrees
     float angleDeg = (float)correctedAngle * 0.01;
 
-    // Check for overflow: valid range is roughly ±2^53 (float precision limit)
+    // Check for overflow
     if (correctedAngle > 9007199254740992LL || correctedAngle < -9007199254740992LL) {
-        Serial.print("ovf");
+        data += "ovf";
     } else {
-        Serial.print(angleDeg, 2);
+        data += String(angleDeg, 2);
     }
-    Serial.print(" ERR:0x");
-    Serial.print(status.errorState, HEX);
-    Serial.println();
+    data += " ERR:0x";
+    data += String(status.errorState, HEX);
+    data += "\n";
+
+    return data;
+}
+
+// Print compact motor data for GUI parsing (supports multiple output modes)
+void printMotorData(const MotorStatus& status, int64_t offset) {
+    String data = formatMotorData(status, offset);
+
+    // Output based on current mode
+    if (currentOutputMode == MODE_SERIAL || currentOutputMode == MODE_BOTH) {
+        Serial.print(data);
+    }
+
+    if (currentOutputMode == MODE_WIFI || currentOutputMode == MODE_BOTH) {
+        WiFiPairing::sendToWiFi(data);
+    }
 }
 
 // Print detailed motor status
@@ -119,6 +145,16 @@ void printHelp() {
     Serial.println("--- Hardware Zero (ROM Write, Permanent) ---");
     Serial.println("SET_ZERO_M1 or ZERO1  - Set Motor 1 zero to ROM (0x19, needs reboot)");
     Serial.println("SET_ZERO_M2 or ZERO2  - Set Motor 2 zero to ROM (0x19, needs reboot)");
+    Serial.println("");
+    Serial.println("--- WiFi Configuration ---");
+    Serial.println("WIFI_CONFIG <SSID> <PASSWORD> - Connect to WiFi and start TCP server");
+    Serial.println("WIFI_STATUS           - Show WiFi connection status");
+    Serial.println("WIFI_DISCONNECT       - Disconnect from WiFi");
+    Serial.println("");
+    Serial.println("--- Output Mode Control ---");
+    Serial.println("MODE_SERIAL           - Output motor data to Serial (default)");
+    Serial.println("MODE_WIFI             - Output motor data to WiFi TCP client");
+    Serial.println("MODE_BOTH             - Output motor data to both Serial and WiFi");
     Serial.println("");
     Serial.println("--- Debug Commands ---");
     Serial.println("RESET_M1 or RESET1    - Reset Motor 1 angle (0x95, not implemented)");
@@ -239,5 +275,70 @@ void processSerialCommand(const String& cmd) {
     }
     else if (cmd == "HELP") {
         printHelp();
+    }
+    // WiFi Configuration Commands
+    else if (cmd.startsWith("WIFI_CONFIG ")) {
+        // Parse SSID and PASSWORD from command
+        String params = cmd.substring(12);  // Remove "WIFI_CONFIG "
+        params.trim();
+
+        int spaceIndex = params.indexOf(' ');
+        if (spaceIndex > 0) {
+            String ssid = params.substring(0, spaceIndex);
+            String password = params.substring(spaceIndex + 1);
+            password.trim();
+
+            Serial.print("[CMD] Configuring WiFi: SSID=");
+            Serial.println(ssid);
+
+            if (WiFiPairing::connectToWiFi(ssid, password)) {
+                if (WiFiPairing::startTCPServer()) {
+                    Serial.println("[OK] WiFi configured successfully!");
+                    Serial.println("[INFO] Use MODE_WIFI to switch output to WiFi");
+                } else {
+                    Serial.println("[ERROR] Failed to start TCP server");
+                }
+            } else {
+                Serial.println("[ERROR] WiFi connection failed");
+            }
+        } else {
+            Serial.println("[ERROR] Usage: WIFI_CONFIG <SSID> <PASSWORD>");
+        }
+    }
+    else if (cmd == "WIFI_STATUS") {
+        WiFiPairing::printWiFiStatus();
+    }
+    else if (cmd == "WIFI_DISCONNECT") {
+        Serial.println("[CMD] Disconnecting WiFi...");
+        WiFiPairing::disconnectWiFi();
+        Serial.println("[OK] WiFi disconnected");
+
+        // Auto-switch to Serial mode if currently in WiFi mode
+        if (currentOutputMode == MODE_WIFI) {
+            currentOutputMode = MODE_SERIAL;
+            Serial.println("[INFO] Output mode switched to SERIAL");
+        }
+    }
+    // Output Mode Control Commands
+    else if (cmd == "MODE_SERIAL") {
+        currentOutputMode = MODE_SERIAL;
+        Serial.println("[OK] Output mode: SERIAL");
+        Serial.println("[INFO] Motor data will output to Serial only");
+    }
+    else if (cmd == "MODE_WIFI") {
+        if (WiFiPairing::isClientConnected()) {
+            currentOutputMode = MODE_WIFI;
+            Serial.println("[OK] Output mode: WIFI");
+            Serial.println("[INFO] Motor data will output to WiFi client only");
+            Serial.println("[INFO] Serial will still accept commands and show status");
+        } else {
+            Serial.println("[ERROR] Cannot switch to WiFi mode: No WiFi client connected");
+            Serial.println("[INFO] Use WIFI_CONFIG to connect WiFi first");
+        }
+    }
+    else if (cmd == "MODE_BOTH") {
+        currentOutputMode = MODE_BOTH;
+        Serial.println("[OK] Output mode: BOTH");
+        Serial.println("[INFO] Motor data will output to both Serial and WiFi (debug mode)");
     }
 }
