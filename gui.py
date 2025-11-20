@@ -50,22 +50,23 @@ class ComponentLauncher(QWidget):
         # Description
         desc = QLabel(self.description)
         desc.setWordWrap(True)
-        desc.setStyleSheet("color: #888; margin-bottom: 20px;")
+        desc.setStyleSheet("color: #95A5A6; margin-bottom: 20px;")
         layout.addWidget(desc)
 
         # Script path
         path_label = QLabel(f"Script: {self.script_path.name}")
-        path_label.setStyleSheet("color: #666; font-family: monospace; font-size: 10pt;")
+        path_label.setStyleSheet("color: #7F8C8D; font-family: monospace; font-size: 10pt;")
         layout.addWidget(path_label)
 
         layout.addSpacing(20)
 
         # Launch button
-        self.launch_btn = QPushButton("🚀 Launch Component")
+        self.launch_btn = QPushButton("▶ Launch Component")
         self.launch_btn.setMinimumHeight(50)
         self.launch_btn.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #27AE60, stop:1 #229954);
                 color: white;
                 border: none;
                 border-radius: 5px;
@@ -73,34 +74,37 @@ class ComponentLauncher(QWidget):
                 font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #45a049;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2ECC71, stop:1 #27AE60);
             }
             QPushButton:disabled {
-                background-color: #cccccc;
-                color: #666666;
+                background-color: rgba(0, 0, 0, 0.2);
+                color: #7F8C8D;
             }
         """)
         self.launch_btn.clicked.connect(self._launch)
         layout.addWidget(self.launch_btn)
 
         # Stop button
-        self.stop_btn = QPushButton("⏹ Stop Component")
+        self.stop_btn = QPushButton("■ Stop Component")
         self.stop_btn.setMinimumHeight(40)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet("""
             QPushButton {
-                background-color: #f44336;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #E74C3C, stop:1 #C0392B);
                 color: white;
                 border: none;
                 border-radius: 5px;
                 font-size: 12pt;
             }
             QPushButton:hover {
-                background-color: #da190b;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #EC7063, stop:1 #E74C3C);
             }
             QPushButton:disabled {
-                background-color: #cccccc;
-                color: #666666;
+                background-color: rgba(0, 0, 0, 0.2);
+                color: #7F8C8D;
             }
         """)
         self.stop_btn.clicked.connect(self._stop)
@@ -110,7 +114,7 @@ class ComponentLauncher(QWidget):
 
         # Status label
         self.status_label = QLabel("Status: Not running")
-        self.status_label.setStyleSheet("color: #666; font-weight: bold;")
+        self.status_label.setStyleSheet("color: #7F8C8D; font-weight: bold;")
         layout.addWidget(self.status_label)
 
         # Log output
@@ -119,7 +123,7 @@ class ComponentLauncher(QWidget):
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setMaximumHeight(200)
-        self.log_text.setStyleSheet("background-color: #1e1e1e; color: #00ff00; font-family: monospace;")
+        self.log_text.setStyleSheet("background-color: #1a252f; color: #ECF0F1; font-family: monospace; border: 1px solid #34495E;")
         log_layout.addWidget(self.log_text)
         log_group.setLayout(log_layout)
         layout.addWidget(log_group)
@@ -143,7 +147,7 @@ class ComponentLauncher(QWidget):
         self.launch_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.status_label.setText("Status: Running")
-        self.status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+        self.status_label.setStyleSheet("color: #27AE60; font-weight: bold;")
         self.log_text.append(f"[{self.component_name}] Launching...\n")
 
     def _stop(self):
@@ -161,7 +165,7 @@ class ComponentLauncher(QWidget):
     def _on_stderr(self):
         """Handle standard error"""
         data = self.process.readAllStandardError().data().decode('utf-8', errors='ignore')
-        self.log_text.append(f"<span style='color: #ff6b6b;'>{data.rstrip()}</span>")
+        self.log_text.append(f"<span style='color: #d32f2f;'>{data.rstrip()}</span>")
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     def _on_finished(self, exit_code, exit_status):
@@ -169,7 +173,7 @@ class ComponentLauncher(QWidget):
         self.launch_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.status_label.setText(f"Status: Stopped (exit code: {exit_code})")
-        self.status_label.setStyleSheet("color: #666; font-weight: bold;")
+        self.status_label.setStyleSheet("color: #7F8C8D; font-weight: bold;")
         self.log_text.append(f"\n[{self.component_name}] Process finished with exit code {exit_code}\n")
 
 
@@ -190,21 +194,23 @@ class SidebarButton(QPushButton):
                 padding: 10px 20px;
                 border: none;
                 background-color: transparent;
-                color: #333;
+                color: #ECF0F1;
                 font-size: 11pt;
             }
             QPushButton:hover:enabled {
-                background-color: #e0e0e0;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(52, 152, 219, 0.3), stop:1 rgba(41, 128, 185, 0.3));
             }
             QPushButton:checked {
-                background-color: #2196F3;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #3498DB, stop:1 #2980B9);
                 color: white;
                 font-weight: bold;
-                border-left: 4px solid #1976D2;
+                border-left: 3px solid #ECF0F1;
             }
             QPushButton:disabled {
-                color: #999;
-                background-color: #f5f5f5;
+                color: #7F8C8D;
+                background-color: rgba(0, 0, 0, 0.2);
             }
         """)
 
@@ -230,11 +236,10 @@ class ExoPulseUnifiedGUI(QMainWindow):
 
         # Component configurations (name, display, description, script, requires_can_mode)
         self.components = [
-            # Always available - Main control
-            ("motor_control", "Motor Control", "Main motor control interface", None, False, False),
+            # Always available - Main control (now with integrated monitoring)
+            ("motor_control", "Motor Control & Monitor", "Integrated motor control and monitoring interface", None, False, False),
 
             # High-level monitoring tools
-            ("motor_monitor", "Motor Monitor", "Advanced monitoring with configurable plots", "motor_monitor.py", True, False),
             ("dual_motor_plotter", "Dual Motor Plotter", "Real-time dual motor visualization (CAN only)", "dual_motor_plotter.py", True, False),
             ("can_plotter", "CAN Plotter", "CAN bus data visualization", "can_plotter.py", True, False),
 
@@ -302,7 +307,11 @@ class ExoPulseUnifiedGUI(QMainWindow):
         sidebar_widget = QWidget()
         sidebar_widget.setMinimumWidth(250)
         sidebar_widget.setMaximumWidth(350)
-        sidebar_widget.setStyleSheet("background-color: #f5f5f5;")
+        sidebar_widget.setStyleSheet("""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #1a252f, stop:1 #2C3E50);
+            border-right: 1px solid #34495E;
+        """)
 
         layout = QVBoxLayout(sidebar_widget)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -312,11 +321,13 @@ class ExoPulseUnifiedGUI(QMainWindow):
         header = QLabel("ExoPulse GUI")
         header.setAlignment(Qt.AlignCenter)
         header.setStyleSheet("""
-            background-color: #2196F3;
-            color: white;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #34495E, stop:1 #2C3E50);
+            color: #ECF0F1;
             padding: 20px;
             font-size: 18pt;
             font-weight: bold;
+            border-bottom: 2px solid #3498DB;
         """)
         layout.addWidget(header)
 
@@ -324,7 +335,24 @@ class ExoPulseUnifiedGUI(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("background-color: #f5f5f5;")
+        scroll.setStyleSheet("""
+            QScrollArea {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #1a252f, stop:1 #2C3E50);
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #3498DB, stop:1 #2980B9);
+                width: 12px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #5DADE2, stop:1 #3498DB);
+                border-radius: 6px;
+            }
+        """)
 
         scroll_content = QWidget()
         scroll_layout = QVBoxLayout(scroll_content)
@@ -334,7 +362,7 @@ class ExoPulseUnifiedGUI(QMainWindow):
         # Section: Main Control
         section_label = QLabel("Main Control")
         section_label.setStyleSheet("""
-            color: #2196F3;
+            color: #5DADE2;
             font-weight: bold;
             font-size: 10pt;
             padding: 15px 20px 5px 20px;
@@ -347,37 +375,37 @@ class ExoPulseUnifiedGUI(QMainWindow):
 
             # Determine icon
             if idx == 0:
-                icon = "🎛️"  # Main control
+                icon = "●"  # Main control
             elif requires_can:
-                icon = "📊"  # CAN monitoring
+                icon = "▣"  # CAN monitoring
             elif is_wifi_tool:
-                icon = "📡"  # WiFi tools
+                icon = "◈"  # WiFi tools
             else:
-                icon = "⚙️"  # General tools
+                icon = "◆"  # General tools
 
             # Add section headers
             if idx == 1:
                 section_label = QLabel("CAN Monitoring Tools")
                 section_label.setStyleSheet("""
-                    color: #2196F3;
+                    color: #5DADE2;
                     font-weight: bold;
                     font-size: 10pt;
                     padding: 15px 20px 5px 20px;
                 """)
                 scroll_layout.addWidget(section_label)
-            elif idx == 4:
+            elif idx == 3:
                 section_label = QLabel("WiFi Tools")
                 section_label.setStyleSheet("""
-                    color: #2196F3;
+                    color: #5DADE2;
                     font-weight: bold;
                     font-size: 10pt;
                     padding: 15px 20px 5px 20px;
                 """)
                 scroll_layout.addWidget(section_label)
-            elif idx == 6:
+            elif idx == 5:
                 section_label = QLabel("General Tools")
                 section_label.setStyleSheet("""
-                    color: #2196F3;
+                    color: #5DADE2;
                     font-weight: bold;
                     font-size: 10pt;
                     padding: 15px 20px 5px 20px;
@@ -402,10 +430,10 @@ class ExoPulseUnifiedGUI(QMainWindow):
         footer = QLabel("v1.0.0")
         footer.setAlignment(Qt.AlignCenter)
         footer.setStyleSheet("""
-            background-color: #e0e0e0;
-            color: #666;
+            color: #7F8C8D;
             padding: 10px;
             font-size: 9pt;
+            background-color: rgba(0, 0, 0, 0.2);
         """)
         layout.addWidget(footer)
 
@@ -457,19 +485,23 @@ class ExoPulseUnifiedGUI(QMainWindow):
         """Apply application theme"""
         self.setStyleSheet("""
             QMainWindow {
-                background-color: white;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2C3E50, stop:1 #34495E);
             }
             QGroupBox {
                 font-weight: bold;
-                border: 1px solid #ccc;
+                border: 1px solid #34495E;
                 border-radius: 5px;
                 margin-top: 10px;
                 padding-top: 10px;
+                color: #ECF0F1;
+                background-color: transparent;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 10px;
                 padding: 0 5px;
+                color: #5DADE2;
             }
         """)
 
