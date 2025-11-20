@@ -4,9 +4,24 @@ Enhanced Real-time Dual Motor Monitor with Angle Display
 Shows: Temperature, Current, Speed, and ANGLE for each motor
 """
 
+import os
+import platform
+import sys
+
+# macOS 相容性設置 - 最小化修改
+if platform.system() == 'Darwin':
+    try:
+        import matplotlib
+        matplotlib.use('Qt5Agg')  # 使用穩定的 Qt5Agg 後端
+    except ImportError:
+        try:
+            import matplotlib
+            matplotlib.use('TkAgg')  # 備用 TkAgg 後端
+        except ImportError:
+            pass  # 使用預設後端
+
 import serial
 import re
-import sys
 import threading
 import time
 from collections import deque
