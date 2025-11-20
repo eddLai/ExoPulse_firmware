@@ -271,6 +271,53 @@ void sendWiFiStatus() {
 }
 
 /**
+ * Handle incoming PING requests from PC and respond with PONG
+ * Protocol:
+ *   PC -> ESP32: [PING] seq:xxx ts:millis
+ *   ESP32 -> PC: [PONG] seq:xxx ts_req:millis ts_reply:millis
+ * Called periodically from WiFi management task
+ */
+void handlePingPong() {
+    if (!client || !client.connected()) {
+        return;
+    }
+
+    // Check for incoming data
+    while (client.available() > 0) {
+        String line = client.readStringUntil('\n');
+        line.trim();
+
+        // Check if it's a PING request
+        if (line.startsWith("[PING]")) {
+            // Parse PING message: [PING] seq:xxx ts:millis
+            int seqIdx = line.indexOf("seq:");
+            int tsIdx = line.indexOf("ts:");
+
+            if (seqIdx > 0 && tsIdx > 0) {
+                // Extract sequence and timestamp
+                String seqStr = line.substring(seqIdx + 4, line.indexOf(' ', seqIdx + 4));
+                String tsStr = line.substring(tsIdx + 3);
+
+                uint32_t seq = seqStr.toInt();
+                uint32_t ts_req = tsStr.toInt();
+                uint32_t ts_reply = millis();
+
+                // Send PONG response
+                String pongMsg = "[PONG] seq:";
+                pongMsg += seq;
+                pongMsg += " ts_req:";
+                pongMsg += ts_req;
+                pongMsg += " ts_reply:";
+                pongMsg += ts_reply;
+                pongMsg += "\n";
+
+                client.print(pongMsg);
+            }
+        }
+    }
+}
+
+/**
  * Check WiFi connection and reconnect if needed
  * Called periodically from WiFi management task
  */
@@ -287,6 +334,9 @@ void checkConnection() {
             }
         }
     }
+
+    // Handle PING/PONG for latency measurement
+    handlePingPong();
 
     // Send periodic WiFi status updates
     sendWiFiStatus();

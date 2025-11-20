@@ -112,7 +112,8 @@ bool readMotorAngle(uint32_t canID, MotorStatus& status) {
     return true;
 }
 
-// Read acceleration
+// Read acceleration (DEPRECATED - not used, calculated from speed instead)
+// NOTE: Command 0x33 appears to not be implemented in motor firmware
 bool readAcceleration(uint32_t canID, MotorStatus& status) {
     if (!sendReadCommand(canID, READ_ACCELERATION)) {
         return false;
@@ -124,7 +125,7 @@ bool readAcceleration(uint32_t canID, MotorStatus& status) {
     }
 
     // Acceleration is int32_t, unit: 1dps/s
-    status.acceleration = (int32_t)(rxData[4] | (rxData[5] << 8) | 
+    status.acceleration = (int32_t)(rxData[4] | (rxData[5] << 8) |
                                     (rxData[6] << 16) | (rxData[7] << 24));
 
     return true;
@@ -148,9 +149,11 @@ bool readMotorComplete(uint8_t motorID, uint32_t canID, MotorStatus& status) {
         success = false;
     }
 
-    if (!readAcceleration(canID, status)) {
-        success = false;
-    }
+    // NOTE: Command 0x33 (READ_ACCELERATION) is not implemented in motor firmware
+    // Acceleration is calculated from speed changes in main.cpp instead
+    // if (!readAcceleration(canID, status)) {
+    //     success = false;
+    // }
 
     if (success) {
         status.timestamp = millis();

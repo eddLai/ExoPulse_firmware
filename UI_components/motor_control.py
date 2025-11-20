@@ -227,6 +227,10 @@ class ExoPulseGUI(QMainWindow):
         self.start_time = time.time()
         self.frame_count = 0
 
+        # Filter initial unstable data (skip first N packets per motor)
+        self.packets_received = {1: 0, 2: 0}  # Track packets per motor
+        self.skip_initial_packets = 5  # Skip first 5 packets to filter startup glitches
+
         # Build UI
         self.setWindowTitle("ExoPulse Enhanced Controller")
         self.setup_ui()
@@ -576,7 +580,7 @@ class ExoPulseGUI(QMainWindow):
             ('current', 'Current', 'A', 'cyan', 'orange'),
             ('speed', 'Speed', 'rad/s', 'cyan', 'orange'),
             ('acceleration', 'Acceleration', 'dps²', 'cyan', 'orange'),
-            ('angle', 'Angle', '°', 'cyan', 'orange'),
+            ('angle', 'Angle', '0.1 deg', 'cyan', 'orange'),
         ]
 
         for key, title, ylabel, color1, color2 in plot_configs:
@@ -953,7 +957,24 @@ class ExoPulseGUI(QMainWindow):
         line = re.sub(r'^\[(UART|WiFi|IMU)[^\]]*\]\s*', '', line)
 
         try:
-            match = re.match(r'\[(\d+)\] M:(\d+) T:(-?\d+) V:([\d.]+) I:([-\d.]+) S:(-?\d+) ACC:(-?\d+) E:(\d+) A:([-\d.]+|ovf) ERR:(0x[\w]+)', line)
+            # Try new format with SEQ field first: [timestamp] SEQ:xxx M:x T:xx ...
+            match = re.match(r'\[(\d+)\]\s+SEQ:(\d+)\s+M:(\d+)\s+T:(-?\d+)\s+V:([\d.]+)\s+I:([-\d.]+)\s+S:(-?\d+)\s+ACC:(-?\d+)\s+E:(\d+)\s+A:([-\d.]+|ovf)\s+ERR:(0x[\w]+)', line)
+            if match:
+                angle_str = match.group(10)
+                angle_val = 0.0 if angle_str == 'ovf' else float(angle_str)
+                return {
+                    'seq': int(match.group(2)),
+                    'motor_id': int(match.group(3)),
+                    'temp': int(match.group(4)),
+                    'voltage': float(match.group(5)),
+                    'current': float(match.group(6)),
+                    'speed': int(match.group(7)),
+                    'acceleration': int(match.group(8)),
+                    'angle': angle_val,
+                }
+
+            # Try old format without SEQ field: [timestamp] M:x T:xx ...
+            match = re.match(r'\[(\d+)\]\s+M:(\d+)\s+T:(-?\d+)\s+V:([\d.]+)\s+I:([-\d.]+)\s+S:(-?\d+)\s+ACC:(-?\d+)\s+E:(\d+)\s+A:([-\d.]+|ovf)\s+ERR:(0x[\w]+)', line)
             if match:
                 angle_str = match.group(9)
                 angle_val = 0.0 if angle_str == 'ovf' else float(angle_str)
@@ -1014,6 +1035,11 @@ class ExoPulseGUI(QMainWindow):
                             self._log("✓ Motor data parsing started")
                         motor_id = status['motor_id']
                         if motor_id in [1, 2]:
+                            # Filter initial unstable packets (skip first N packets per motor)
+                            self.packets_received[motor_id] += 1
+                            if self.packets_received[motor_id] <= self.skip_initial_packets:
+                                continue  # Skip this packet
+
                             elapsed = time.time() - self.start_time
                             self.motor_status[motor_id].update(status)
                             data = self.motor_data[motor_id]

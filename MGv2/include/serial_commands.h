@@ -21,11 +21,16 @@ enum OutputMode {
 // External reference to current output mode (defined in main.cpp)
 extern volatile OutputMode currentOutputMode;
 
+// External reference to packet sequence counter (defined in main.cpp)
+extern uint32_t packetSequence;
+
 // Format motor data as string
 String formatMotorData(const MotorStatus& status, int64_t offset) {
     String data = "[";
     data += status.timestamp;
-    data += "] M:";
+    data += "] SEQ:";
+    data += packetSequence;
+    data += " M:";
     data += status.motorID;
     data += " T:";
     data += status.temperature;
@@ -71,6 +76,9 @@ void printMotorData(const MotorStatus& status, int64_t offset) {
     if (currentOutputMode == MODE_WIFI || currentOutputMode == MODE_BOTH) {
         WiFiPairing::sendToWiFi(data);
     }
+
+    // Increment packet sequence counter
+    packetSequence++;
 }
 
 // Print detailed motor status

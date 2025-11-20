@@ -39,11 +39,20 @@ int64_t motor2_angle_offset = 0;
 // Output mode control (default: Serial)
 volatile OutputMode currentOutputMode = MODE_SERIAL;
 
+// Packet sequence counter for connection quality monitoring
+uint32_t packetSequence = 0;
+
 // Latest motor status (for calibration commands)
 volatile int64_t motor1_latest_angle = 0;
 volatile int64_t motor2_latest_angle = 0;
 volatile bool motor1_data_valid = false;
 volatile bool motor2_data_valid = false;
+
+// Previous speed for acceleration calculation
+int16_t motor1_prev_speed = 0;
+int16_t motor2_prev_speed = 0;
+uint32_t motor1_prev_time = 0;
+uint32_t motor2_prev_time = 0;
 
 // CAN Reading Task (High Priority) - Runs on Core 1
 void canReadTask(void *parameter) {
@@ -53,6 +62,20 @@ void canReadTask(void *parameter) {
     while (true) {
         // Read Motor 1
         if (readMotorComplete(MOTOR_ID_1, CAN_ID_1, status1)) {
+            // Calculate acceleration from speed change
+            uint32_t current_time = millis();
+            if (motor1_prev_time > 0) {
+                uint32_t dt = current_time - motor1_prev_time;  // ms
+                if (dt > 0) {
+                    // Acceleration = (v1 - v0) / dt
+                    // speed in dps, dt in ms -> acc in dps/s = (dv * 1000) / dt
+                    int32_t dv = status1.speed - motor1_prev_speed;
+                    status1.acceleration = (dv * 1000) / (int32_t)dt;
+                }
+            }
+            motor1_prev_speed = status1.speed;
+            motor1_prev_time = current_time;
+
             xQueueSend(motorDataQueue, &status1, 0);
             // Update latest angle for calibration
             motor1_latest_angle = status1.motorAngle;
@@ -65,6 +88,20 @@ void canReadTask(void *parameter) {
 
         // Read Motor 2
         if (readMotorComplete(MOTOR_ID_2, CAN_ID_2, status2)) {
+            // Calculate acceleration from speed change
+            uint32_t current_time = millis();
+            if (motor2_prev_time > 0) {
+                uint32_t dt = current_time - motor2_prev_time;  // ms
+                if (dt > 0) {
+                    // Acceleration = (v1 - v0) / dt
+                    // speed in dps, dt in ms -> acc in dps/s = (dv * 1000) / dt
+                    int32_t dv = status2.speed - motor2_prev_speed;
+                    status2.acceleration = (dv * 1000) / (int32_t)dt;
+                }
+            }
+            motor2_prev_speed = status2.speed;
+            motor2_prev_time = current_time;
+
             xQueueSend(motorDataQueue, &status2, 0);
             // Update latest angle for calibration
             motor2_latest_angle = status2.motorAngle;
