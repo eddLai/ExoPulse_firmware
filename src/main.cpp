@@ -66,6 +66,16 @@ SemaphoreHandle_t canMutex;
 TaskHandle_t canReadTaskHandle;
 TaskHandle_t serialOutputTaskHandle;
 
+// Software angle offset (safe, no ROM write)
+int64_t motor1_angle_offset = 0;  // Motor 1 zero position offset
+int64_t motor2_angle_offset = 0;  // Motor 2 zero position offset
+
+// Latest motor status (for calibration commands)
+volatile int64_t motor1_latest_angle = 0;
+volatile int64_t motor2_latest_angle = 0;
+volatile bool motor1_data_valid = false;
+volatile bool motor2_data_valid = false;
+
 // Send a read command to specific motor
 bool sendReadCommand(uint32_t canID, uint8_t cmd) {
     uint8_t txData[8] = {cmd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -330,6 +340,9 @@ void canReadTask(void *parameter) {
         // Read Motor 1
         if (readMotorComplete(MOTOR_ID_1, CAN_ID_1, status1)) {
             xQueueSend(motorDataQueue, &status1, 0);
+            // Update latest angle for calibration
+            motor1_latest_angle = status1.motorAngle;
+            motor1_data_valid = true;
             digitalWrite(LED_PIN, HIGH);
         }
 
@@ -339,6 +352,9 @@ void canReadTask(void *parameter) {
         // Read Motor 2
         if (readMotorComplete(MOTOR_ID_2, CAN_ID_2, status2)) {
             xQueueSend(motorDataQueue, &status2, 0);
+            // Update latest angle for calibration
+            motor2_latest_angle = status2.motorAngle;
+            motor2_data_valid = true;
             digitalWrite(LED_PIN, LOW);
         }
 
@@ -405,15 +421,84 @@ void serialOutputTask(void *parameter) {
                     Serial.println("[ERROR] Some motor resets failed!");
                 }
             }
+            else if (cmd == "CAL_M1" || cmd == "CALIBRATE_M1" || cmd == "CAL1") {
+                Serial.println("[CMD] Calibrating Motor 1 zero position (software offset)...");
+                if (motor1_data_valid) {
+                    motor1_angle_offset = motor1_latest_angle;
+                    Serial.print("[OK] Motor 1 calibrated! Current angle set to zero (offset = ");
+                    Serial.print((float)motor1_angle_offset * 0.01, 2);
+                    Serial.println("°)");
+                    Serial.println("[INFO] This is a software offset - no ROM write, resets on reboot");
+                } else {
+                    Serial.println("[ERROR] Motor 1 data not available yet, please wait...");
+                }
+            }
+            else if (cmd == "CAL_M2" || cmd == "CALIBRATE_M2" || cmd == "CAL2") {
+                Serial.println("[CMD] Calibrating Motor 2 zero position (software offset)...");
+                if (motor2_data_valid) {
+                    motor2_angle_offset = motor2_latest_angle;
+                    Serial.print("[OK] Motor 2 calibrated! Current angle set to zero (offset = ");
+                    Serial.print((float)motor2_angle_offset * 0.01, 2);
+                    Serial.println("°)");
+                    Serial.println("[INFO] This is a software offset - no ROM write, resets on reboot");
+                } else {
+                    Serial.println("[ERROR] Motor 2 data not available yet, please wait...");
+                }
+            }
+            else if (cmd == "CAL_ALL" || cmd == "CALIBRATE" || cmd == "CAL") {
+                Serial.println("[CMD] Calibrating ALL motors (software offset)...");
+                Serial.println("[INFO] Note: CAL_ALL is best implemented in GUI");
+                Serial.println("[INFO] Firmware provides: CAL1, CAL2 as atomic operations");
+
+                // Simple implementation: calibrate both if data available
+                bool m1_ok = false, m2_ok = false;
+
+                if (motor1_data_valid) {
+                    motor1_angle_offset = motor1_latest_angle;
+                    Serial.print("[OK] Motor 1 calibrated (offset = ");
+                    Serial.print((float)motor1_angle_offset * 0.01, 2);
+                    Serial.println("°)");
+                    m1_ok = true;
+                }
+
+                if (motor2_data_valid) {
+                    motor2_angle_offset = motor2_latest_angle;
+                    Serial.print("[OK] Motor 2 calibrated (offset = ");
+                    Serial.print((float)motor2_angle_offset * 0.01, 2);
+                    Serial.println("°)");
+                    m2_ok = true;
+                }
+
+                if (m1_ok && m2_ok) {
+                    Serial.println("[OK] All motors calibrated!");
+                } else {
+                    Serial.println("[WARNING] Some motors not calibrated (data not available)");
+                }
+                Serial.println("[INFO] Software offset - no ROM write, resets on reboot");
+            }
+            else if (cmd == "CLEAR_CAL" || cmd == "RESET_CAL") {
+                Serial.println("[CMD] Clearing software calibration offsets...");
+                motor1_angle_offset = 0;
+                motor2_angle_offset = 0;
+                Serial.println("[OK] All calibration offsets cleared");
+            }
             else if (cmd == "HELP") {
                 Serial.println("\n=== Available Commands ===");
-                Serial.println("SET_ZERO_M1 or ZERO1  - Set Motor 1 zero to ROM (0x19, permanent)");
-                Serial.println("SET_ZERO_M2 or ZERO2  - Set Motor 2 zero to ROM (0x19, permanent)");
+                Serial.println("--- Software Calibration (Safe, No ROM Write) ---");
+                Serial.println("CAL_M1 or CAL1        - Calibrate Motor 1 (set current position as zero)");
+                Serial.println("CAL_M2 or CAL2        - Calibrate Motor 2 (set current position as zero)");
+                Serial.println("CAL_ALL or CAL        - Calibrate both motors");
+                Serial.println("CLEAR_CAL             - Clear all calibration offsets");
+                Serial.println("");
+                Serial.println("--- Hardware Zero (ROM Write, Permanent) ---");
+                Serial.println("SET_ZERO_M1 or ZERO1  - Set Motor 1 zero to ROM (0x19, needs reboot)");
+                Serial.println("SET_ZERO_M2 or ZERO2  - Set Motor 2 zero to ROM (0x19, needs reboot)");
+                Serial.println("");
+                Serial.println("--- Debug Commands ---");
                 Serial.println("RESET_M1 or RESET1    - Reset Motor 1 angle (0x95, not implemented)");
                 Serial.println("RESET_M2 or RESET2    - Reset Motor 2 angle (0x95, not implemented)");
                 Serial.println("RESET_ALL or RESET    - Reset both motors (0x95, not implemented)");
                 Serial.println("HELP                  - Show this help");
-                Serial.println("NOTE: SET_ZERO commands require MCU reboot to take effect");
                 Serial.println("========================\n");
             }
         }
@@ -439,10 +524,17 @@ void serialOutputTask(void *parameter) {
             Serial.print(" E:");
             Serial.print(status.encoder);
             Serial.print(" A:");
-            // Calculate angle in degrees (move outside if block for wider scope)
-            float angleDeg = (float)status.motorAngle * 0.01;
+            // Apply software calibration offset
+            int64_t correctedAngle = status.motorAngle;
+            if (status.motorID == MOTOR_ID_1) {
+                correctedAngle -= motor1_angle_offset;
+            } else if (status.motorID == MOTOR_ID_2) {
+                correctedAngle -= motor2_angle_offset;
+            }
+            // Calculate angle in degrees
+            float angleDeg = (float)correctedAngle * 0.01;
             // Check for overflow: valid range is roughly ±2^53 (float precision limit)
-            if (status.motorAngle > 9007199254740992LL || status.motorAngle < -9007199254740992LL) {
+            if (correctedAngle > 9007199254740992LL || correctedAngle < -9007199254740992LL) {
                 Serial.print("ovf");
             } else {
                 Serial.print(angleDeg, 2);
@@ -491,17 +583,26 @@ void serialOutputTask(void *parameter) {
                 Serial.println(" (0~16383)");
 
                 Serial.print("Multi-turn Angle:");
+                // Apply calibration offset for detailed output
+                int64_t detailedCorrectedAngle = status.motorAngle;
+                if (status.motorID == MOTOR_ID_1) {
+                    detailedCorrectedAngle -= motor1_angle_offset;
+                } else if (status.motorID == MOTOR_ID_2) {
+                    detailedCorrectedAngle -= motor2_angle_offset;
+                }
+                float detailedAngleDeg = (float)detailedCorrectedAngle * 0.01;
+
                 // Check for overflow
-                if (status.motorAngle > 9007199254740992LL || status.motorAngle < -9007199254740992LL) {
+                if (detailedCorrectedAngle > 9007199254740992LL || detailedCorrectedAngle < -9007199254740992LL) {
                     Serial.print("ovf");
                     Serial.print(" °  (ovf turns) [RAW: 0x");
                     Serial.print((uint32_t)(status.motorAngle >> 32), HEX);
                     Serial.print((uint32_t)(status.motorAngle & 0xFFFFFFFF), HEX);
                     Serial.println("]");
                 } else {
-                    Serial.print(angleDeg, 2);
+                    Serial.print(detailedAngleDeg, 2);
                     Serial.print(" °  (");
-                    Serial.print(angleDeg / 360.0, 2);
+                    Serial.print(detailedAngleDeg / 360.0, 2);
                     Serial.println(" turns)");
                 }
 
