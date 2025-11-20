@@ -38,6 +38,9 @@ class EnhancedDualMotorGUI:
         self.ser = None
         self.running = False
         self.serial_lock = threading.Lock()  # Thread-safe serial access
+        self.connection_status = "Disconnected"  # Track connection status
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
 
         # Data storage for Motor 1
         self.data_m1 = {
@@ -65,14 +68,74 @@ class EnhancedDualMotorGUI:
         self.start_time = time.time()
         self.frame_count = 0
 
-    def connect(self):
+    def cleanup_port(self):
+        """Force close any existing connections to the serial port"""
         try:
+            # Try to close any existing serial connection
+            if self.ser and self.ser.is_open:
+                print(f"⚙ Closing existing connection to {self.port}...")
+                self.ser.close()
+                time.sleep(0.5)
+        except:
+            pass
+
+        # Additional cleanup: kill any processes using the port (Linux/macOS)
+        try:
+            import subprocess
+            result = subprocess.run(['lsof', self.port], capture_output=True, text=True, timeout=1)
+            if result.stdout:
+                print(f"⚙ Found processes using {self.port}, attempting cleanup...")
+                time.sleep(1)  # Give time for port to be released
+        except:
+            pass
+
+    def connect(self):
+        # Clean up any existing connections first
+        self.cleanup_port()
+
+        try:
+            print(f"⚙ Opening {self.port}...")
             self.ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
+            self.connection_status = "Connected"
+            self.reconnect_attempts = 0
             print(f"✓ Connected to {self.port}")
             time.sleep(1)
             return True
         except Exception as e:
-            print(f"✗ Failed: {e}")
+            self.connection_status = f"Error: {e}"
+            print(f"✗ Connection failed: {e}")
+            print(f"   Tip: Check cable connection and run 'ls -l {self.port}' to verify port exists")
+            return False
+
+    def reconnect(self):
+        """Attempt to reconnect to serial port"""
+        if self.reconnect_attempts >= self.max_reconnect_attempts:
+            print(f"✗ Max reconnection attempts ({self.max_reconnect_attempts}) reached. Giving up.")
+            return False
+
+        self.reconnect_attempts += 1
+        self.connection_status = f"Reconnecting... (attempt {self.reconnect_attempts}/{self.max_reconnect_attempts})"
+        print(f"\n⚠ Connection lost! Attempting to reconnect ({self.reconnect_attempts}/{self.max_reconnect_attempts})...")
+
+        # Close old connection if exists
+        try:
+            if self.ser and self.ser.is_open:
+                self.ser.close()
+        except:
+            pass
+
+        time.sleep(2)  # Wait before reconnecting
+
+        # Try to reconnect
+        try:
+            self.ser = serial.Serial(self.port, self.baudrate, timeout=0.1)
+            self.connection_status = "Connected (Reconnected)"
+            self.reconnect_attempts = 0
+            print(f"✓ Reconnected successfully!")
+            return True
+        except Exception as e:
+            self.connection_status = f"Reconnect failed: {e}"
+            print(f"✗ Reconnection failed: {e}")
             return False
 
     def parse_line(self, line):
@@ -98,11 +161,11 @@ class EnhancedDualMotorGUI:
         return None
 
     def read_serial_thread(self):
-        """Serial reader thread with thread-safe access"""
+        """Serial reader thread with robust error handling and auto-reconnect"""
         while self.running:
             try:
                 with self.serial_lock:
-                    if self.ser and self.ser.in_waiting:
+                    if self.ser and self.ser.is_open and self.ser.in_waiting:
                         line = self.ser.readline().decode('utf-8', errors='ignore').strip()
                     else:
                         line = None
@@ -131,36 +194,65 @@ class EnhancedDualMotorGUI:
                             self.data_m2['angle'].append(status['angle'])
                 else:
                     time.sleep(0.001)
-            except:
-                break
+
+            except (serial.SerialException, OSError) as e:
+                # Serial port disconnected or I/O error
+                print(f"\n⚠ Serial error: {e}")
+                self.connection_status = f"Error: {e}"
+
+                # Attempt to reconnect
+                if self.reconnect():
+                    continue  # Successfully reconnected, continue reading
+                else:
+                    # Failed to reconnect after max attempts
+                    print("✗ Unable to reconnect. Stopping data collection.")
+                    self.connection_status = "Connection lost"
+                    time.sleep(1)  # Slow down retry loop
+
+            except Exception as e:
+                # Unexpected error - log but continue
+                print(f"\n⚠ Unexpected error in serial thread: {e}")
+                time.sleep(0.1)  # Brief pause before continuing
 
     def calibrate_motor(self, motor_id):
         """Calibrate motor zero position (software offset, no ROM write)"""
-        with self.serial_lock:
-            if self.ser and self.ser.is_open:
-                if motor_id == 1:
-                    self.ser.write(b"CAL1\n")
-                    self.ser.flush()
-                    print("✓ Calibrating Motor 1 (software offset)...")
-                elif motor_id == 2:
-                    self.ser.write(b"CAL2\n")
-                    self.ser.flush()
-                    print("✓ Calibrating Motor 2 (software offset)...")
-                elif motor_id == 0:  # Calibrate both
-                    self.ser.write(b"CAL1\n")
-                    self.ser.flush()
-                    time.sleep(0.2)  # Small delay between commands
-                    self.ser.write(b"CAL2\n")
-                    self.ser.flush()
-                    print("✓ Calibrating BOTH motors (software offset)...")
+        try:
+            with self.serial_lock:
+                if self.ser and self.ser.is_open:
+                    if motor_id == 1:
+                        self.ser.write(b"CAL1\n")
+                        self.ser.flush()
+                        print("✓ Calibrating Motor 1 (software offset)...")
+                    elif motor_id == 2:
+                        self.ser.write(b"CAL2\n")
+                        self.ser.flush()
+                        print("✓ Calibrating Motor 2 (software offset)...")
+                    elif motor_id == 0:  # Calibrate both
+                        self.ser.write(b"CAL1\n")
+                        self.ser.flush()
+                        time.sleep(0.2)  # Small delay between commands
+                        self.ser.write(b"CAL2\n")
+                        self.ser.flush()
+                        print("✓ Calibrating BOTH motors (software offset)...")
+                else:
+                    print("✗ Cannot calibrate: Serial port not connected")
+        except (serial.SerialException, OSError) as e:
+            print(f"✗ Calibration failed: {e}")
+            self.connection_status = f"Error: {e}"
 
     def clear_calibration(self):
         """Clear all calibration offsets (restore original angles)"""
-        with self.serial_lock:
-            if self.ser and self.ser.is_open:
-                self.ser.write(b"CLEAR_CAL\n")
-                self.ser.flush()
-                print("✓ Calibration cleared - angles restored to original values")
+        try:
+            with self.serial_lock:
+                if self.ser and self.ser.is_open:
+                    self.ser.write(b"CLEAR_CAL\n")
+                    self.ser.flush()
+                    print("✓ Calibration cleared - angles restored to original values")
+                else:
+                    print("✗ Cannot clear calibration: Serial port not connected")
+        except (serial.SerialException, OSError) as e:
+            print(f"✗ Clear calibration failed: {e}")
+            self.connection_status = f"Error: {e}"
 
     def init_plot(self):
         """Initialize plots with 5 rows: Temp, Current, Speed, Acceleration, Angle"""
@@ -356,12 +448,22 @@ class EnhancedDualMotorGUI:
                 margin = (angle_max - angle_min) * 0.1 + 1
                 self.ax2_angle.set_ylim(angle_min - margin, angle_max + margin)
 
-        # Update status text
+        # Update status text with connection status
         self.frame_count += 1
         if self.frame_count % 20 == 0:
             s1 = self.status_m1
             s2 = self.status_m2
-            status = (f"M1: {s1['temp']}°C | {s1['voltage']:.1f}V | {s1['current']:.2f}A | "
+
+            # Connection indicator
+            if "Connected" in self.connection_status:
+                conn_indicator = "🟢"  # Green dot for connected
+            elif "Reconnecting" in self.connection_status:
+                conn_indicator = "🟡"  # Yellow dot for reconnecting
+            else:
+                conn_indicator = "🔴"  # Red dot for disconnected
+
+            status = (f"{conn_indicator} {self.connection_status} | "
+                     f"M1: {s1['temp']}°C | {s1['voltage']:.1f}V | {s1['current']:.2f}A | "
                      f"{s1['speed']}°/s | Acc:{s1['acceleration']}dps² | Angle:{s1['angle']:.1f}°  ||  "
                      f"M2: {s2['temp']}°C | {s2['voltage']:.1f}V | {s2['current']:.2f}A | "
                      f"{s2['speed']}°/s | Acc:{s2['acceleration']}dps² | Angle:{s2['angle']:.1f}°")
@@ -405,11 +507,27 @@ class EnhancedDualMotorGUI:
         try:
             plt.show()
         except KeyboardInterrupt:
-            print("\n✓ Stopped")
+            print("\n⚠ Interrupted by user (Ctrl+C)")
         finally:
+            print("\n⚙ Cleaning up...")
             self.running = False
-            if self.ser:
-                self.ser.close()
+
+            # Stop serial thread
+            if hasattr(self, 'thread') and self.thread.is_alive():
+                print("  - Stopping serial reader thread...")
+                time.sleep(0.2)  # Give thread time to finish current operation
+
+            # Close serial port
+            try:
+                if self.ser and self.ser.is_open:
+                    print(f"  - Closing serial port {self.port}...")
+                    self.ser.close()
+                    time.sleep(0.3)  # Ensure port is fully released
+                    print("  ✓ Serial port closed successfully")
+            except Exception as e:
+                print(f"  ⚠ Warning while closing port: {e}")
+
+            print("✓ Cleanup complete. Port is ready for next run.")
 
 def main():
     port = sys.argv[1] if len(sys.argv) > 1 else '/dev/ttyUSB0'
