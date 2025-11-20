@@ -234,13 +234,16 @@ class ExoPulseUnifiedGUI(QMainWindow):
         self.sidebar_buttons = []
         self.content_stack = QStackedWidget()
 
-        # Component configurations (name, display, description, script, requires_can_mode)
+        # Component configurations (name, display, description, script, requires_can_mode, is_wifi_tool)
         self.components = [
             # Always available - Main control (now with integrated monitoring)
             ("motor_control", "Motor Control & Monitor", "Integrated motor control and monitoring interface", None, False, False),
 
             # Independent tools
             ("emg_plotter", "EMG Plotter", "EMG signal visualization", "emg_plotter.py", False, False),
+
+            # WiFi Tools
+            ("wifi_setup", "WiFi Configuration", "Configure ESP32 WiFi and monitor connection quality", "auto_wifi_setup.py", False, True),
         ]
 
         self._init_ui()
@@ -377,6 +380,15 @@ class ExoPulseUnifiedGUI(QMainWindow):
             # Add section headers
             if idx == 1:
                 section_label = QLabel("Additional Tools")
+                section_label.setStyleSheet("""
+                    color: #5DADE2;
+                    font-weight: bold;
+                    font-size: 10pt;
+                    padding: 15px 20px 5px 20px;
+                """)
+                scroll_layout.addWidget(section_label)
+            elif idx == 2 and is_wifi_tool:
+                section_label = QLabel("Debug Tools")
                 section_label.setStyleSheet("""
                     color: #5DADE2;
                     font-weight: bold;

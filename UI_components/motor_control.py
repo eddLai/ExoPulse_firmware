@@ -793,8 +793,8 @@ class ExoPulseGUI(QMainWindow):
         btn_serial_plot.clicked.connect(lambda: (self._launch_serial_plotter(), dialog.accept()))
         layout.addWidget(btn_serial_plot)
         
-        # WiFi Monitor
-        btn_wifi = QPushButton("📶  WiFi Monitor")
+        # WiFi Configuration & Monitor
+        btn_wifi = QPushButton("📶  WiFi Configuration")
         btn_wifi.clicked.connect(lambda: (self._launch_wifi_monitor(), dialog.accept()))
         layout.addWidget(btn_wifi)
         
@@ -814,17 +814,15 @@ class ExoPulseGUI(QMainWindow):
             QMessageBox.warning(self, "Error", "serial_plotter.py not found")
 
     def _launch_wifi_monitor(self):
-        """Launch WiFi Monitor"""
+        """Launch WiFi Configuration and Monitor"""
         import subprocess
-        script = Path(__file__).parent / 'wifi_monitor.py'
+        script = Path(__file__).parent / 'auto_wifi_setup.py'
         if script.exists():
-            # Launch in new window with ESP32 IP (GUI app)
-            # Use configured WiFi settings or default
-            esp32_ip = "10.154.48.200"  # From ESP32_IP constant
-            port = "8888"
-            subprocess.Popen([sys.executable, str(script), esp32_ip, port])
+            # Launch WiFi configuration tool (GUI app)
+            # Will show config page if no args provided
+            subprocess.Popen([sys.executable, str(script)])
         else:
-            QMessageBox.warning(self, "Error", "wifi_monitor.py not found")
+            QMessageBox.warning(self, "Error", "auto_wifi_setup.py not found")
 
     # ========== IMU Window ==========
     def _toggle_imu_window(self):
