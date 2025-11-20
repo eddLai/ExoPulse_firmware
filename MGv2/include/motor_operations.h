@@ -90,23 +90,24 @@ bool readMotorStatus1(uint32_t canID, MotorStatus& status) {
     return true;
 }
 
-// Read multi-turn angle
-bool readMultiTurnAngle(uint32_t canID, MotorStatus& status) {
-    if (!sendReadCommand(canID, READ_MULTI_ANGLE)) {
+// Read motor angle (using single-turn mode 0x94)
+bool readMotorAngle(uint32_t canID, MotorStatus& status) {
+    if (!sendReadCommand(canID, READ_SINGLE_ANGLE)) {
         return false;
     }
 
     uint8_t rxData[8];
-    if (!readMotorResponse(canID, READ_MULTI_ANGLE, rxData, 50)) {
+    if (!readMotorResponse(canID, READ_SINGLE_ANGLE, rxData, 50)) {
         return false;
     }
 
-    status.motorAngle = (int64_t)rxData[1]
-                      | ((int64_t)rxData[2] << 8)
-                      | ((int64_t)rxData[3] << 16)
-                      | ((int64_t)rxData[4] << 24)
-                      | ((int64_t)rxData[5] << 32)
-                      | ((int64_t)rxData[6] << 40);
+    // Single-turn angle is uint32_t in rxData[4-7], unit: 0.01°/LSB
+    // Range: 0 ~ 36000*gear_ratio - 1 (cycles back to 0 after full rotation)
+    uint32_t singleAngle = (uint32_t)(rxData[4] | (rxData[5] << 8) |
+                                      (rxData[6] << 16) | (rxData[7] << 24));
+
+    // Convert to int64_t for compatibility with existing structure
+    status.motorAngle = (int64_t)singleAngle;
 
     return true;
 }
@@ -123,8 +124,8 @@ bool readAcceleration(uint32_t canID, MotorStatus& status) {
     }
 
     // Acceleration is int32_t, unit: 1dps/s
-    int32_t accel = (int32_t)(rxData[4] | (rxData[5] << 8) | (rxData[6] << 16) | (rxData[7] << 24));
-    status.acceleration = (int16_t)(accel);  // Truncate to int16_t for compact storage
+    status.acceleration = (int32_t)(rxData[4] | (rxData[5] << 8) | 
+                                    (rxData[6] << 16) | (rxData[7] << 24));
 
     return true;
 }
@@ -143,7 +144,7 @@ bool readMotorComplete(uint8_t motorID, uint32_t canID, MotorStatus& status) {
         success = false;
     }
 
-    if (!readMultiTurnAngle(canID, status)) {
+    if (!readMotorAngle(canID, status)) {
         success = false;
     }
 

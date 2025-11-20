@@ -27,6 +27,7 @@ uint32_t connectionStartTime = 0;
 // Statistics
 uint32_t packetsSent = 0;
 uint32_t bytesSent = 0;
+uint32_t lastRSSISendTime = 0;
 
 /**
  * Connect to WiFi network
@@ -246,6 +247,30 @@ void printWiFiStatus() {
 }
 
 /**
+ * Send periodic WiFi status updates to client
+ * Called periodically from WiFi management task
+ */
+void sendWiFiStatus() {
+    if (!client || !client.connected() || !wifiConnected) {
+        return;
+    }
+
+    // Send RSSI update every 1 second (for connection quality monitoring)
+    uint32_t now = millis();
+    if (now - lastRSSISendTime >= 1000) {
+        lastRSSISendTime = now;
+
+        String statusMsg = "[WIFI_STATUS] SSID:";
+        statusMsg += wifi_ssid;
+        statusMsg += " RSSI:";
+        statusMsg += WiFi.RSSI();
+        statusMsg += "\n";
+
+        client.print(statusMsg);
+    }
+}
+
+/**
  * Check WiFi connection and reconnect if needed
  * Called periodically from WiFi management task
  */
@@ -262,6 +287,9 @@ void checkConnection() {
             }
         }
     }
+
+    // Send periodic WiFi status updates
+    sendWiFiStatus();
 }
 
 } // namespace WiFiPairing
