@@ -428,7 +428,7 @@ class ExoPulseUnifiedGUI(QMainWindow):
         """Connect signals from motor control to update sidebar"""
         # Connect motor type change signal
         self.motor_control.radio_can.toggled.connect(self._on_motor_type_changed)
-        self.motor_control.radio_wifi.toggled.connect(self._on_comm_mode_changed)
+        # Note: Communication mode is now managed via status bar in motor_control.py
 
     def _on_motor_type_changed(self, checked):
         """Handle motor type change to enable/disable sidebar buttons"""
@@ -443,16 +443,6 @@ class ExoPulseUnifiedGUI(QMainWindow):
         mode_name = "CAN" if is_can_mode else "Lower Chip"
         print(f"Motor mode changed to: {mode_name}")
         print(f"CAN monitoring tools {'enabled' if is_can_mode else 'disabled'}")
-
-    def _on_comm_mode_changed(self, checked):
-        """Handle communication mode change"""
-        is_wifi_mode = checked
-
-        for btn in self.sidebar_buttons:
-            is_wifi_tool = btn.property("is_wifi_tool")
-            if is_wifi_tool:
-                # WiFi tools more useful in WiFi mode, but still accessible
-                pass  # Keep enabled for now
 
     def _on_sidebar_click(self, index):
         """Handle sidebar button click"""

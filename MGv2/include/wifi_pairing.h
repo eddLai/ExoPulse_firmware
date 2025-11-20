@@ -287,8 +287,30 @@ void handlePingPong() {
         String line = client.readStringUntil('\n');
         line.trim();
 
+        // Check if it's a TEST request
+        if (line.startsWith("[TEST]")) {
+            // Parse TEST message: [TEST] seq:xxx
+            int seqIdx = line.indexOf("seq:");
+
+            if (seqIdx > 0) {
+                // Extract sequence number
+                String seqStr = line.substring(seqIdx + 4);
+                uint32_t seq = seqStr.toInt();
+
+                // Send TEST_REPLY response
+                String testReplyMsg = "[TEST_REPLY] seq:";
+                testReplyMsg += seq;
+                testReplyMsg += " data:OK timestamp:";
+                testReplyMsg += millis();
+                testReplyMsg += " rssi:";
+                testReplyMsg += WiFi.RSSI();
+                testReplyMsg += "\n";
+
+                client.print(testReplyMsg);
+            }
+        }
         // Check if it's a PING request
-        if (line.startsWith("[PING]")) {
+        else if (line.startsWith("[PING]")) {
             // Parse PING message: [PING] seq:xxx ts:millis
             int seqIdx = line.indexOf("seq:");
             int tsIdx = line.indexOf("ts:");

@@ -147,6 +147,8 @@ def setup_wifi(ssid=None, password=None):
         if ip_address:
             print(f"\n✓ ESP32 IP Address: {ip_address}")
             print(f"✓ WiFi configured successfully!")
+            print(f"   Output mode: UART (default)")
+            print(f"   You can switch to WiFi mode using: MODE_WIFI command")
             return ip_address
         else:
             print("\n✗ Could not find IP address")
@@ -185,6 +187,22 @@ class WiFiSignalMonitor(QMainWindow):
         self.pc_ping_history = deque(maxlen=10)   # Last 10 seconds
         self.mcu_last_ping = 0
         self.pc_last_ping = 0
+
+        # Bidirectional transmission test
+        self.test_running = False
+        self.test_start_time = 0  # Test start timestamp (ms)
+        self.ping_seq = 0
+        self.ping_sent_times = {}  # Map seq -> sent timestamp (ms relative to test start)
+        self.latency_history = deque(maxlen=10)  # Last 10 RTT measurements
+        self.current_rtt = 0
+
+        # Packet loss tracking (per motor)
+        self.last_motor1_seq = None
+        self.last_motor2_seq = None
+        self.motor1_packets_received = 0
+        self.motor2_packets_received = 0
+        self.motor1_packets_lost = 0
+        self.motor2_packets_lost = 0
 
         # WiFi configuration
         self.config_signals = WiFiConfigSignals()
@@ -388,9 +406,34 @@ class WiFiSignalMonitor(QMainWindow):
         )
         layout.addWidget(pc_group)
 
+        # === TRANSMISSION TEST METRICS ===
+        metrics_group = self._create_metrics_group()
+        layout.addWidget(metrics_group)
+
         # === CONTROL BUTTONS ===
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
+
+        # Test button
+        self.test_btn = QPushButton("▶ Start Test")
+        self.test_btn.setMinimumHeight(40)
+        self.test_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #27AE60, stop:1 #229954);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                font-size: 12pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2ECC71, stop:1 #27AE60);
+            }
+        """)
+        self.test_btn.clicked.connect(self._toggle_test)
+        button_layout.addWidget(self.test_btn)
 
         self.reconnect_btn = QPushButton("↻ Reconnect")
         self.reconnect_btn.setMinimumHeight(40)
@@ -461,7 +504,7 @@ class WiFiSignalMonitor(QMainWindow):
         return page
 
     def _create_signal_group(self, title, prefix, is_mcu):
-        """Create a signal strength display group"""
+        """Create a signal strength display group with radar-style indicator"""
         group = QGroupBox(title)
         layout = QVBoxLayout()
         layout.setSpacing(15)
@@ -476,70 +519,140 @@ class WiFiSignalMonitor(QMainWindow):
         else:
             self.pc_ssid_label = ssid_label
 
-        # Connection Quality Display
-        quality_layout = QHBoxLayout()
+        # Signal Strength Display (Radar-style)
+        signal_layout = QHBoxLayout()
 
-        # Success rate (large, prominent)
-        success_label = QLabel("0%")
-        success_label.setStyleSheet("color: #ECF0F1; font-size: 32pt; font-weight: bold; min-width: 100px;")
-        quality_layout.addWidget(success_label)
-
-        if is_mcu:
-            self.mcu_quality_label = success_label
-        else:
-            self.pc_quality_label = success_label
-
-        # Vertical divider
-        quality_layout.addSpacing(20)
-
-        # RSSI value (smaller, secondary info)
-        rssi_info_layout = QVBoxLayout()
-        rssi_title = QLabel("RSSI")
-        rssi_title.setStyleSheet("color: #7F8C8D; font-size: 10pt;")
-        rssi_info_layout.addWidget(rssi_title)
-
-        rssi_value_label = QLabel("0 dBm")
-        rssi_value_label.setStyleSheet("color: #BDC3C7; font-size: 14pt; font-weight: bold;")
-        rssi_info_layout.addWidget(rssi_value_label)
+        # RSSI value (large, prominent)
+        rssi_value_label = QLabel("-- dBm")
+        rssi_value_label.setStyleSheet("color: #ECF0F1; font-size: 28pt; font-weight: bold; min-width: 150px;")
+        signal_layout.addWidget(rssi_value_label)
 
         if is_mcu:
             self.mcu_rssi_label = rssi_value_label
         else:
             self.pc_rssi_label = rssi_value_label
 
-        quality_layout.addLayout(rssi_info_layout)
-        quality_layout.addStretch()
-        layout.addLayout(quality_layout)
+        signal_layout.addSpacing(20)
 
-        # Progress Bar
-        progress = QProgressBar()
-        progress.setMinimum(0)
-        progress.setMaximum(100)
-        progress.setValue(0)
-        progress.setTextVisible(True)
-        progress.setFormat("%p%")
-        progress.setMinimumHeight(30)
-        progress.setStyleSheet("""
-            QProgressBar {
-                border: 2px solid #34495E;
-                border-radius: 5px;
-                background-color: #1a252f;
-                text-align: center;
-                color: #ECF0F1;
-                font-weight: bold;
-            }
-            QProgressBar::chunk {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #27AE60, stop:1 #229954);
-                border-radius: 3px;
-            }
-        """)
-        layout.addWidget(progress)
+        # Radar-style signal indicator (color blocks)
+        indicator_layout = QVBoxLayout()
+        indicator_title = QLabel("Signal Level")
+        indicator_title.setStyleSheet("color: #7F8C8D; font-size: 9pt;")
+        indicator_layout.addWidget(indicator_title)
+
+        # Create 5 level blocks (Green -> Yellow -> Red)
+        blocks_layout = QHBoxLayout()
+        blocks_layout.setSpacing(5)
+
+        signal_blocks = []
+        for i in range(5):
+            block = QLabel()
+            block.setFixedSize(30, 40)
+            block.setStyleSheet("background-color: #34495E; border: 1px solid #2C3E50; border-radius: 3px;")
+            blocks_layout.addWidget(block)
+            signal_blocks.append(block)
 
         if is_mcu:
-            self.mcu_progress = progress
+            self.mcu_signal_blocks = signal_blocks
         else:
-            self.pc_progress = progress
+            self.pc_signal_blocks = signal_blocks
+
+        indicator_layout.addLayout(blocks_layout)
+        signal_layout.addLayout(indicator_layout)
+        signal_layout.addStretch()
+        layout.addLayout(signal_layout)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_metrics_group(self):
+        """Create connection quality metrics display group"""
+        group = QGroupBox("Transmission Quality Metrics")
+        layout = QVBoxLayout()
+        layout.setSpacing(10)
+
+        # Packet Loss Section
+        loss_title = QLabel("Packet Loss Rate")
+        loss_title.setStyleSheet("color: #ECF0F1; font-size: 12pt; font-weight: bold;")
+        layout.addWidget(loss_title)
+
+        loss_layout = QHBoxLayout()
+
+        # Motor 1
+        m1_layout = QVBoxLayout()
+        m1_title = QLabel("Motor 1")
+        m1_title.setStyleSheet("color: cyan; font-size: 10pt; font-weight: bold;")
+        m1_layout.addWidget(m1_title)
+
+        self.m1_loss_label = QLabel("0.00%")
+        self.m1_loss_label.setStyleSheet("color: #2ECC71; font-size: 20pt; font-weight: bold;")
+        m1_layout.addWidget(self.m1_loss_label)
+
+        self.m1_packets_label = QLabel("(0/0)")
+        self.m1_packets_label.setStyleSheet("color: #BDC3C7; font-size: 10pt;")
+        m1_layout.addWidget(self.m1_packets_label)
+
+        loss_layout.addLayout(m1_layout)
+        loss_layout.addSpacing(20)
+
+        # Motor 2
+        m2_layout = QVBoxLayout()
+        m2_title = QLabel("Motor 2")
+        m2_title.setStyleSheet("color: orange; font-size: 10pt; font-weight: bold;")
+        m2_layout.addWidget(m2_title)
+
+        self.m2_loss_label = QLabel("0.00%")
+        self.m2_loss_label.setStyleSheet("color: #2ECC71; font-size: 20pt; font-weight: bold;")
+        m2_layout.addWidget(self.m2_loss_label)
+
+        self.m2_packets_label = QLabel("(0/0)")
+        self.m2_packets_label.setStyleSheet("color: #BDC3C7; font-size: 10pt;")
+        m2_layout.addWidget(self.m2_packets_label)
+
+        loss_layout.addLayout(m2_layout)
+        loss_layout.addStretch()
+
+        layout.addLayout(loss_layout)
+
+        # Divider
+        divider = QLabel()
+        divider.setStyleSheet("background-color: #34495E; max-height: 2px;")
+        layout.addWidget(divider)
+
+        # Latency Section
+        latency_title = QLabel("Network Latency (RTT)")
+        latency_title.setStyleSheet("color: #ECF0F1; font-size: 12pt; font-weight: bold;")
+        layout.addWidget(latency_title)
+
+        latency_layout = QHBoxLayout()
+
+        # Current RTT
+        current_layout = QVBoxLayout()
+        current_title = QLabel("Current")
+        current_title.setStyleSheet("color: #7F8C8D; font-size: 10pt;")
+        current_layout.addWidget(current_title)
+
+        self.latency_label = QLabel("-- ms")
+        self.latency_label.setStyleSheet("color: #3498DB; font-size: 18pt; font-weight: bold;")
+        current_layout.addWidget(self.latency_label)
+
+        latency_layout.addLayout(current_layout)
+        latency_layout.addSpacing(20)
+
+        # Stats
+        stats_layout = QVBoxLayout()
+        self.latency_avg_label = QLabel("Avg: -- ms")
+        self.latency_avg_label.setStyleSheet("color: #BDC3C7; font-size: 10pt;")
+        stats_layout.addWidget(self.latency_avg_label)
+
+        self.latency_minmax_label = QLabel("Min: -- ms  Max: -- ms")
+        self.latency_minmax_label.setStyleSheet("color: #BDC3C7; font-size: 10pt;")
+        stats_layout.addWidget(self.latency_minmax_label)
+
+        latency_layout.addLayout(stats_layout)
+        latency_layout.addStretch()
+
+        layout.addLayout(latency_layout)
 
         group.setLayout(layout)
         return group
@@ -560,6 +673,11 @@ class WiFiSignalMonitor(QMainWindow):
         self.stats_timer = QTimer()
         self.stats_timer.timeout.connect(self._update_connection_stats)
         self.stats_timer.start(1000)
+
+        # PING timer for latency measurement (started/stopped by test toggle)
+        self.ping_timer = QTimer()
+        self.ping_timer.timeout.connect(self._send_ping)
+        # Timer is NOT started here - controlled by _toggle_test()
 
     def _connect_to_esp32(self):
         """Connect to ESP32 TCP server"""
@@ -597,7 +715,7 @@ class WiFiSignalMonitor(QMainWindow):
         try:
             # Check if data is available
             self.socket.settimeout(0.1)
-            data = self.socket.recv(1024).decode('utf-8', errors='ignore')
+            data = self.socket.recv(4096).decode('utf-8', errors='ignore')
 
             if data:
                 # Parse WiFi status messages
@@ -610,7 +728,64 @@ class WiFiSignalMonitor(QMainWindow):
 
                     # Update UI
                     self.mcu_ssid_label.setText(f"Network: {self.mcu_ssid}")
-                    self.mcu_rssi_label.setText(f"{self.mcu_rssi} dBm")
+
+                # Parse motor data with SEQ field (for packet loss tracking)
+                if self.test_running:
+                    motor_matches = re.finditer(r'\[(\d+)\]\s+SEQ:(\d+)\s+M:(\d+)', data)
+                    for match in motor_matches:
+                        seq = int(match.group(2))
+                        motor_id = int(match.group(3))
+
+                        if motor_id == 1:
+                            self.motor1_packets_received += 1
+                            if self.last_motor1_seq is not None:
+                                expected_seq = (self.last_motor1_seq + 1) % (2**32)
+                                if seq != expected_seq:
+                                    if seq > expected_seq:
+                                        lost = seq - expected_seq
+                                    else:
+                                        lost = (2**32 - expected_seq) + seq
+                                    self.motor1_packets_lost += lost
+                            self.last_motor1_seq = seq
+
+                        elif motor_id == 2:
+                            self.motor2_packets_received += 1
+                            if self.last_motor2_seq is not None:
+                                expected_seq = (self.last_motor2_seq + 1) % (2**32)
+                                if seq != expected_seq:
+                                    if seq > expected_seq:
+                                        lost = seq - expected_seq
+                                    else:
+                                        lost = (2**32 - expected_seq) + seq
+                                    self.motor2_packets_lost += lost
+                            self.last_motor2_seq = seq
+
+                    # Update packet loss display
+                    self._update_packet_loss_display()
+
+                    # Parse PONG responses for latency measurement
+                    pong_match = re.search(r'\[PONG\]\s+seq:(\d+)\s+ts_req:(\d+)\s+ts_reply:(\d+)', data)
+                    if pong_match:
+                        seq = int(pong_match.group(1))
+
+                        # Calculate RTT using PC-side recorded send time
+                        if seq in self.ping_sent_times:
+                            sent_time_ms = self.ping_sent_times[seq]
+                            current_time_ms = int(time.time() * 1000)
+                            rtt = current_time_ms - sent_time_ms
+
+                            self.current_rtt = rtt
+                            self.latency_history.append(rtt)
+
+                            # Clean up old entries (keep only last 10)
+                            if len(self.ping_sent_times) > 20:
+                                # Remove oldest entries
+                                old_seqs = sorted(self.ping_sent_times.keys())[:-10]
+                                for old_seq in old_seqs:
+                                    del self.ping_sent_times[old_seq]
+
+                            # Update latency display
+                            self._update_latency_display()
 
         except socket.timeout:
             # No data available - this is normal
@@ -684,66 +859,206 @@ class WiFiSignalMonitor(QMainWindow):
         else:
             self.pc_ping_history.append(0)
 
-        # Calculate success rates
-        if len(self.mcu_ping_history) > 0:
-            mcu_success_rate = (sum(self.mcu_ping_history) / len(self.mcu_ping_history)) * 100
+        # Update signal displays with current RSSI
+        if self.mcu_rssi != 0:
             self._update_quality_display(
-                self.mcu_quality_label,
-                self.mcu_progress,
-                mcu_success_rate
+                self.mcu_rssi_label,
+                self.mcu_signal_blocks,
+                self.mcu_rssi
             )
 
-        if len(self.pc_ping_history) > 0:
-            pc_success_rate = (sum(self.pc_ping_history) / len(self.pc_ping_history)) * 100
+        if self.pc_rssi != 0:
             self._update_quality_display(
-                self.pc_quality_label,
-                self.pc_progress,
-                pc_success_rate
+                self.pc_rssi_label,
+                self.pc_signal_blocks,
+                self.pc_rssi
             )
 
-    def _update_quality_display(self, quality_label, progress, success_rate):
-        """Update connection quality display (ping-like success rate)"""
-        # Update success rate percentage
-        quality_label.setText(f"{int(success_rate)}%")
-
-        # Update progress bar
-        progress.setValue(int(success_rate))
-
-        # Determine quality based on success rate
-        if success_rate >= 95:
-            quality_color = "#27AE60"  # Excellent - Green
-            progress_color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #27AE60, stop:1 #229954)"
-        elif success_rate >= 80:
-            quality_color = "#2ECC71"  # Good - Light Green
-            progress_color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2ECC71, stop:1 #27AE60)"
-        elif success_rate >= 60:
-            quality_color = "#F39C12"  # Fair - Orange
-            progress_color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #F39C12, stop:1 #E67E22)"
-        elif success_rate >= 30:
-            quality_color = "#E67E22"  # Poor - Dark Orange
-            progress_color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #E67E22, stop:1 #D35400)"
+    def _update_signal_blocks(self, blocks, rssi):
+        """Update radar-style signal blocks based on RSSI
+        RSSI ranges: -30 (excellent) to -100 (no signal)
+        """
+        # Determine how many blocks to light up (0-5)
+        if rssi >= -50:
+            num_blocks = 5  # Excellent
+        elif rssi >= -60:
+            num_blocks = 4  # Good
+        elif rssi >= -70:
+            num_blocks = 3  # Fair
+        elif rssi >= -80:
+            num_blocks = 2  # Poor
+        elif rssi >= -90:
+            num_blocks = 1  # Very poor
         else:
-            quality_color = "#E74C3C"  # Critical - Red
-            progress_color = "qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #E74C3C, stop:1 #C0392B)"
+            num_blocks = 0  # No signal
 
-        # Update quality label color
-        quality_label.setStyleSheet(f"color: {quality_color}; font-size: 32pt; font-weight: bold; min-width: 100px;")
+        # Update block colors
+        for i, block in enumerate(blocks):
+            if i < num_blocks:
+                # Light up based on position (green -> yellow -> red)
+                if i < 3:
+                    color = "#27AE60"  # Green
+                elif i < 4:
+                    color = "#F39C12"  # Yellow/Orange
+                else:
+                    color = "#E74C3C"  # Red
+                block.setStyleSheet(f"background-color: {color}; border: 1px solid #2C3E50; border-radius: 3px;")
+            else:
+                # Dim/off
+                block.setStyleSheet("background-color: #34495E; border: 1px solid #2C3E50; border-radius: 3px;")
 
-        # Update progress bar color
-        progress.setStyleSheet(f"""
-            QProgressBar {{
-                border: 2px solid #34495E;
-                border-radius: 5px;
-                background-color: #1a252f;
-                text-align: center;
-                color: #ECF0F1;
-                font-weight: bold;
-            }}
-            QProgressBar::chunk {{
-                background: {progress_color};
-                border-radius: 3px;
-            }}
-        """)
+    def _update_quality_display(self, rssi_label, blocks, rssi):
+        """Update signal strength display with RSSI value and blocks"""
+        # Update RSSI label
+        rssi_label.setText(f"{rssi} dBm")
+
+        # Update color blocks
+        self._update_signal_blocks(blocks, rssi)
+
+    def _toggle_test(self):
+        """Toggle bidirectional transmission test"""
+        if not self.test_running:
+            # Start test
+            self.test_running = True
+            self.test_btn.setText("■ Stop Test")
+            self.test_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #E74C3C, stop:1 #C0392B);
+                    color: white;
+                    border: none;
+                    border-radius: 5px;
+                    font-size: 12pt;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #EC7063, stop:1 #E74C3C);
+                }
+            """)
+
+            # Reset test statistics and record start time
+            self.test_start_time = int(time.time() * 1000)  # Record test start time
+            self.ping_seq = 0
+            self.ping_sent_times.clear()
+            self.latency_history.clear()
+            self.last_motor1_seq = None
+            self.last_motor2_seq = None
+            self.motor1_packets_received = 0
+            self.motor2_packets_received = 0
+            self.motor1_packets_lost = 0
+            self.motor2_packets_lost = 0
+
+            # Start PING timer (send PING every 1 second)
+            self.ping_timer.start(1000)
+
+            print("[TEST] Bidirectional transmission test started")
+        else:
+            # Stop test
+            self.test_running = False
+            self.test_btn.setText("▶ Start Test")
+            self.test_btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #27AE60, stop:1 #229954);
+                    color: white;
+                    border: none;
+                    border-radius: 5px;
+                    font-size: 12pt;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #2ECC71, stop:1 #27AE60);
+                }
+            """)
+
+            # Stop PING timer
+            self.ping_timer.stop()
+
+            print("[TEST] Bidirectional transmission test stopped")
+
+    def _send_ping(self):
+        """Send PING request to ESP32 for latency measurement"""
+        if not self.connected or not self.socket or not self.test_running:
+            return
+
+        try:
+            self.ping_seq += 1
+            current_time_ms = int(time.time() * 1000)
+
+            # Use relative timestamp from test start
+            relative_timestamp_ms = current_time_ms - self.test_start_time
+            ping_msg = f"[PING] seq:{self.ping_seq} ts:{relative_timestamp_ms}\n"
+
+            # Record absolute sent time for RTT calculation
+            self.ping_sent_times[self.ping_seq] = current_time_ms
+
+            self.socket.send(ping_msg.encode('utf-8'))
+        except Exception as e:
+            print(f"Ping send error: {e}")
+
+    def _update_packet_loss_display(self):
+        """Update packet loss statistics display"""
+        if not self.test_running:
+            return
+
+        # Motor 1 packet loss
+        m1_total = self.motor1_packets_received + self.motor1_packets_lost
+        if m1_total > 0:
+            m1_loss_rate = (self.motor1_packets_lost / m1_total) * 100
+            self.m1_loss_label.setText(f"{m1_loss_rate:.2f}%")
+            self.m1_packets_label.setText(f"({self.motor1_packets_lost}/{m1_total})")
+
+            # Color code based on loss rate
+            if m1_loss_rate < 1.0:
+                color = "#2ECC71"  # Green - Good
+            elif m1_loss_rate < 5.0:
+                color = "#F39C12"  # Orange - Fair
+            else:
+                color = "#E74C3C"  # Red - Poor
+            self.m1_loss_label.setStyleSheet(f"color: {color}; font-size: 20pt; font-weight: bold;")
+
+        # Motor 2 packet loss
+        m2_total = self.motor2_packets_received + self.motor2_packets_lost
+        if m2_total > 0:
+            m2_loss_rate = (self.motor2_packets_lost / m2_total) * 100
+            self.m2_loss_label.setText(f"{m2_loss_rate:.2f}%")
+            self.m2_packets_label.setText(f"({self.motor2_packets_lost}/{m2_total})")
+
+            # Color code based on loss rate
+            if m2_loss_rate < 1.0:
+                color = "#2ECC71"  # Green - Good
+            elif m2_loss_rate < 5.0:
+                color = "#F39C12"  # Orange - Fair
+            else:
+                color = "#E74C3C"  # Red - Poor
+            self.m2_loss_label.setStyleSheet(f"color: {color}; font-size: 20pt; font-weight: bold;")
+
+    def _update_latency_display(self):
+        """Update latency statistics display"""
+        if not self.test_running or len(self.latency_history) == 0:
+            return
+
+        # Current RTT
+        self.latency_label.setText(f"{self.current_rtt:.1f} ms")
+
+        # Statistics
+        avg_rtt = sum(self.latency_history) / len(self.latency_history)
+        min_rtt = min(self.latency_history)
+        max_rtt = max(self.latency_history)
+
+        self.latency_avg_label.setText(f"Avg: {avg_rtt:.1f} ms")
+        self.latency_minmax_label.setText(f"Min: {min_rtt:.1f} ms  Max: {max_rtt:.1f} ms")
+
+        # Color code based on latency
+        if self.current_rtt < 50:
+            color = "#2ECC71"  # Green - Excellent
+        elif self.current_rtt < 100:
+            color = "#F39C12"  # Orange - Fair
+        else:
+            color = "#E74C3C"  # Red - Poor
+        self.latency_label.setStyleSheet(f"color: {color}; font-size: 18pt; font-weight: bold;")
 
     def _start_wifi_config(self):
         """Start WiFi configuration process"""
@@ -804,6 +1119,8 @@ class WiFiSignalMonitor(QMainWindow):
     def _on_config_complete(self, ip_address):
         """Handle successful WiFi configuration"""
         self.config_log.append(f"<span style='color: #27AE60;'>✓ Configuration complete! IP: {ip_address}</span>")
+        self.config_log.append(f"<span style='color: #F39C12;'>ℹ Output mode: UART (default)</span>")
+        self.config_log.append(f"<span style='color: #F39C12;'>ℹ You can switch to WiFi mode using: MODE_WIFI command</span>")
         self.config_log.append("<span style='color: #3498DB;'>Switching to monitor view...</span>")
 
         # Set IP and switch to monitor page

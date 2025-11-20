@@ -235,10 +235,9 @@ class ExoPulseGUI(QMainWindow):
         self.setWindowTitle("ExoPulse Enhanced Controller")
         self.setup_ui()
 
-        # Start with WiFi mode
-        self.current_mode = "wifi"
-        self._connect_tcp_async()
-        self._start_udp_listener()
+        # Start with UART mode
+        self.current_mode = "uart"
+        self._start_uart_listener()
 
         # Start data pump timer
         self.timer = QTimer()
@@ -395,25 +394,43 @@ class ExoPulseGUI(QMainWindow):
         control_group.setLayout(control_layout)
         scroll_layout.addWidget(control_group)
 
-        # === Communication Group ===
+        # === Communication Status Bar ===
         comm_group = QGroupBox("Communication")
         comm_layout = QVBoxLayout()
 
-        # Source selection
-        row5 = QHBoxLayout()
-        self.mode_group = QButtonGroup()
-        self.radio_wifi = QRadioButton("WiFi")
-        self.radio_uart = QRadioButton("UART")
-        self.radio_wifi.setChecked(True)
-        if serial is None:
-            self.radio_uart.setEnabled(False)
-        self.mode_group.addButton(self.radio_wifi)
-        self.mode_group.addButton(self.radio_uart)
-        row5.addWidget(self.radio_wifi)
-        row5.addWidget(self.radio_uart)
-        comm_layout.addLayout(row5)
+        # Status display (read-only, shows current mode)
+        status_row = QHBoxLayout()
+        status_row.addWidget(QLabel("Mode:"))
+        self.comm_status_label = QLabel("UART")
+        self.comm_status_label.setStyleSheet("""
+            QLabel {
+                background-color: #2C3E50;
+                color: #ECF0F1;
+                padding: 5px 10px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+        """)
+        status_row.addWidget(self.comm_status_label)
+        status_row.addStretch()
+        comm_layout.addLayout(status_row)
 
-        # COM port
+        # Connection info display (for WiFi IP, etc.)
+        info_row = QHBoxLayout()
+        info_row.addWidget(QLabel("Info:"))
+        self.comm_info_label = QLabel("--")
+        self.comm_info_label.setStyleSheet("""
+            QLabel {
+                color: #95A5A6;
+                font-family: monospace;
+                padding: 2px 5px;
+            }
+        """)
+        info_row.addWidget(self.comm_info_label)
+        info_row.addStretch()
+        comm_layout.addLayout(info_row)
+
+        # Auto-detect COM port for UART with dropdown selector
         if serial and list_ports:
             all_ports = [p.device for p in list_ports.comports()]
             # Look for both ttyUSB and ttyACM devices
@@ -423,14 +440,43 @@ class ExoPulseGUI(QMainWindow):
         else:
             ports = ["No USB/ACM port"]
 
+        # Create port dropdown
+        port_row = QHBoxLayout()
+        port_row.addWidget(QLabel("Port:"))
         self.combo_com = QComboBox()
         self.combo_com.addItems(ports)
-        # Auto-select first available port
-        if len(ports) > 0 and not ports[0].startswith("No "):
-            self.combo_com.setCurrentText(ports[0])
-        comm_layout.addWidget(self.combo_com)
+        if ports and not ports[0].startswith("No "):
+            self.combo_com.setCurrentIndex(0)
+        port_row.addWidget(self.combo_com)
+        comm_layout.addLayout(port_row)
 
-        self.radio_wifi.toggled.connect(self._on_mode_change)
+        # Store selected port
+        self.detected_uart_port = self.combo_com.currentText()
+
+        # WiFi Configuration button
+        self.btn_wifi_config = QPushButton("📡 WiFi Configuration")
+        self.btn_wifi_config.setMinimumHeight(35)
+        self.btn_wifi_config.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #3498DB, stop:1 #2980B9);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #5DADE2, stop:1 #3498DB);
+            }
+            QPushButton:disabled {
+                background-color: #7F8C8D;
+                color: #BDC3C7;
+            }
+        """)
+        self.btn_wifi_config.clicked.connect(self._test_and_switch_wifi)
+        comm_layout.addWidget(self.btn_wifi_config)
 
         comm_group.setLayout(comm_layout)
         scroll_layout.addWidget(comm_group)
@@ -808,7 +854,7 @@ class ExoPulseGUI(QMainWindow):
     def _launch_serial_plotter(self):
         """Launch Serial Plotter with current communication settings"""
         import subprocess
-        port = self.combo_com.currentText() if hasattr(self, 'combo_com') else '/dev/ttyACM0'
+        port = self.detected_uart_port if hasattr(self, 'detected_uart_port') else '/dev/ttyACM0'
         script = Path(__file__).parent / 'serial_plotter.py'
         if script.exists():
             # Launch in new terminal window
@@ -895,7 +941,8 @@ class ExoPulseGUI(QMainWindow):
 
         def listener():
             try:
-                port = self.combo_com.currentText()
+                # Get port from combo box if available, otherwise use stored value
+                port = self.combo_com.currentText() if hasattr(self, 'combo_com') else self.detected_uart_port
                 if port.startswith("No "):
                     self.data_queue.put(("log", "⚠ No USB/ACM port available"))
                     return
@@ -1058,6 +1105,10 @@ class ExoPulseGUI(QMainWindow):
                 self._tcp_ready(msg)
             elif msg_type == "auto_calibrate":
                 self._auto_calibrate()
+            elif msg_type == "wifi_test_success":
+                self._wifi_test_success()
+            elif msg_type == "wifi_test_failed":
+                self._wifi_test_failed(msg)
 
         # Update IMU if visible
         if self.imu_window and self.imu_window.isVisible():
@@ -1181,21 +1232,116 @@ class ExoPulseGUI(QMainWindow):
                 self._log(f"⚠ Save error: {exc}")
             self.btn_record.setText("Start Record")
 
-    def _on_mode_change(self):
-        """Handle mode change"""
-        if self.radio_wifi.isChecked():
-            self.current_mode = "wifi"
-            self.stop_uart_evt.set()
-            self.stop_udp_evt.clear()
-            self._log("🔁 WiFi mode")
-            self._connect_tcp_async()
-            self._start_udp_listener()
-        else:
-            self.current_mode = "uart"
-            self.stop_udp_evt.set()
-            self.stop_uart_evt.clear()
-            self._log("🔁 UART mode")
-            self._start_uart_listener()
+    def _test_and_switch_wifi(self):
+        """Test WiFi connection and switch to WiFi mode if successful"""
+        self.btn_wifi_config.setEnabled(False)
+        self.btn_wifi_config.setText("Testing WiFi...")
+        self._log("🔍 Testing WiFi connection...")
+        
+        def test_worker():
+            try:
+                # Test TCP connection
+                test_sock = socket.create_connection((ESP32_IP, ESP32_PORT), timeout=3)
+                test_sock.close()
+                self.data_queue.put(("wifi_test_success", None))
+            except Exception as exc:
+                self.data_queue.put(("wifi_test_failed", str(exc)))
+        
+        threading.Thread(target=test_worker, daemon=True).start()
+    
+    def _wifi_test_success(self):
+        """Handle successful WiFi test - switch to WiFi mode"""
+        # Stop UART
+        self.stop_uart_evt.set()
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.close()
+            except:
+                pass
+        
+        # Switch to WiFi mode
+        self.current_mode = "wifi"
+        self.stop_udp_evt.clear()
+        self.comm_status_label.setText("WiFi")
+        self.comm_status_label.setStyleSheet("""
+            QLabel {
+                background-color: #27AE60;
+                color: white;
+                padding: 5px 10px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+        """)
+        self.comm_info_label.setText(f"{ESP32_IP}:{ESP32_PORT}")
+        
+        self._log(f"✓ WiFi test successful - switched to WiFi mode")
+        self._log(f"✓ Connected to {ESP32_IP}:{ESP32_PORT}")
+        
+        # Start WiFi connections
+        self._connect_tcp_async()
+        self._start_udp_listener()
+        
+        # Change button to "Back to UART"
+        self.btn_wifi_config.setText("⬅ Back to UART")
+        self.btn_wifi_config.setEnabled(True)
+        self.btn_wifi_config.clicked.disconnect()
+        self.btn_wifi_config.clicked.connect(self._switch_back_to_uart)
+    
+    def _wifi_test_failed(self, error_msg):
+        """Handle failed WiFi test"""
+        self._log(f"✗ WiFi test failed: {error_msg}")
+        self._log("⚠ Staying in UART mode")
+        self.btn_wifi_config.setText("📡 WiFi Configuration")
+        self.btn_wifi_config.setEnabled(True)
+        
+        QMessageBox.warning(
+            self,
+            "WiFi Test Failed",
+            f"Cannot connect to ESP32 at {ESP32_IP}:{ESP32_PORT}\n\n"
+            f"Error: {error_msg}\n\n"
+            "Please check:\n"
+            "1. ESP32 is powered on\n"
+            "2. WiFi is configured correctly\n"
+            "3. IP address is correct\n\n"
+            "Staying in UART mode.",
+            QMessageBox.Ok
+        )
+    
+    def _switch_back_to_uart(self):
+        """Switch back from WiFi to UART mode"""
+        # Stop WiFi connections
+        self.stop_udp_evt.set()
+        if self.tcp_sock:
+            try:
+                self.tcp_sock.close()
+            except:
+                pass
+            self.tcp_sock = None
+        
+        # Switch to UART mode
+        self.current_mode = "uart"
+        self.stop_uart_evt.clear()
+        self.comm_status_label.setText("UART")
+        self.comm_status_label.setStyleSheet("""
+            QLabel {
+                background-color: #2C3E50;
+                color: #ECF0F1;
+                padding: 5px 10px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+        """)
+        self.comm_info_label.setText("--")
+        
+        self._log("🔁 Switched back to UART mode")
+        
+        # Start UART
+        self._start_uart_listener()
+        
+        # Change button back to WiFi Config
+        self.btn_wifi_config.setText("📡 WiFi Configuration")
+        self.btn_wifi_config.clicked.disconnect()
+        self.btn_wifi_config.clicked.connect(self._test_and_switch_wifi)
 
     def closeEvent(self, event):
         """Handle close"""
