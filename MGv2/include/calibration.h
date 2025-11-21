@@ -119,6 +119,103 @@ bool setMotorZeroToROM(uint32_t canID) {
     return success;
 }
 
+// Write encoder offset to ROM as motor zero point - Command 0x91
+// encoderOffset: uint16_t, max 65535 (protocol DATA[6-7] only supports 2 bytes)
+// Note: Motor uses 18-bit encoder (0~262143), but this command only sets lower 16 bits
+// TX: [0x91] [0x00] [0x00] [0x00] [0x00] [0x00] [offset_L] [offset_H]
+// RX: Motor echoes the same frame back
+bool writeEncoderOffsetToROM(uint32_t canID, uint16_t encoderOffset) {
+    uint8_t txData[8] = {
+        WRITE_ENCODER_OFFSET,                   // DATA[0]: Command 0x91
+        0x00,                                    // DATA[1]: NULL
+        0x00,                                    // DATA[2]: NULL
+        0x00,                                    // DATA[3]: NULL
+        0x00,                                    // DATA[4]: NULL
+        0x00,                                    // DATA[5]: NULL
+        (uint8_t)(encoderOffset & 0xFF),        // DATA[6]: offset low byte
+        (uint8_t)((encoderOffset >> 8) & 0xFF)  // DATA[7]: offset high byte
+    };
+
+    Serial.print("[CAL] Writing encoder offset to ROM: ");
+    Serial.print(encoderOffset);
+    Serial.print(" (0x");
+    Serial.print(encoderOffset, HEX);
+    Serial.println(")");
+
+    Serial.print("[CAL] TX: ");
+    for (int i = 0; i < 8; i++) {
+        Serial.print("0x");
+        if (txData[i] < 16) Serial.print("0");
+        Serial.print(txData[i], HEX);
+        Serial.print(" ");
+    }
+    Serial.println();
+
+    // Suspend CAN read task to avoid interference
+    vTaskSuspend(canReadTaskHandle);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Clear CAN receive buffer
+    if (xSemaphoreTake(canMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        while (CAN.checkReceive() == CAN_MSGAVAIL) {
+            unsigned long rxId;
+            byte len;
+            uint8_t dummyData[8];
+            CAN.readMsgBuf(&rxId, &len, dummyData);
+        }
+        xSemaphoreGive(canMutex);
+    }
+
+    bool success = false;
+
+    if (xSemaphoreTake(canMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        byte rc = CAN.sendMsgBuf(canID, 0, 8, txData);
+        xSemaphoreGive(canMutex);
+
+        if (rc == CAN_OK) {
+            Serial.println("[CAL] Command sent, waiting for response...");
+
+            uint8_t rxData[8] = {0};
+            uint32_t startTime = millis();
+
+            while (millis() - startTime < 500) {
+                if (xSemaphoreTake(canMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                    if (CAN.checkReceive() == CAN_MSGAVAIL) {
+                        unsigned long rxId;
+                        byte len;
+                        CAN.readMsgBuf(&rxId, &len, rxData);
+                        xSemaphoreGive(canMutex);
+
+                        if (rxId == canID && rxData[0] == WRITE_ENCODER_OFFSET) {
+                            uint16_t confirmedOffset = rxData[6] | (rxData[7] << 8);
+                            Serial.print("[CAL] Confirmed! Encoder offset set to: ");
+                            Serial.println(confirmedOffset);
+                            success = true;
+                            break;
+                        }
+                    } else {
+                        xSemaphoreGive(canMutex);
+                    }
+                }
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+
+            if (!success) {
+                Serial.println("[CAL] ERROR: Response timeout!");
+            }
+        } else {
+            Serial.println("[CAL] ERROR: CAN send failed!");
+        }
+    } else {
+        Serial.println("[CAL] ERROR: Failed to acquire mutex!");
+    }
+
+    // Resume CAN read task
+    vTaskResume(canReadTaskHandle);
+
+    return success;
+}
+
 // Clear motor angle (reset current position to zero) - Command 0x95
 // NOTE: This command is NOT IMPLEMENTED in motor firmware (see datasheet)
 bool clearMotorAngle(uint32_t canID) {

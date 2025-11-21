@@ -39,7 +39,6 @@ enum MotorReadCommand : uint8_t {
     READ_PID_PARAMS         = 0x30,
     READ_ACCELERATION       = 0x33,
     READ_ENCODER            = 0x90,
-    READ_MULTI_ANGLE        = 0x92,
     READ_SINGLE_ANGLE       = 0x94,
     READ_STATUS_1_ERROR     = 0x9A,
     READ_STATUS_2           = 0x9C,
@@ -55,7 +54,7 @@ struct MotorStatus {
     int16_t torqueCurrent;   // iq: -2048~2048 → -33A~33A
     int16_t speed;           // dps (degrees per second)
     int32_t acceleration;    // dps/s (degrees per second squared) - INT32 format from motor
-    uint16_t encoder;        // 0~16383 (14-bit)
+    uint32_t encoder;        // 0~262143 (18-bit)
     int64_t motorAngle;      // 0.01°/LSB (multi-turn cumulative)
     uint32_t timestamp;      // millis() when read
 };
@@ -377,7 +376,7 @@ void serialOutputTask(void *parameter) {
 
                 Serial.print("Encoder:         ");
                 Serial.print(status.encoder);
-                Serial.println(" (0~16383)");
+                Serial.println(" (0~262143)");
 
                 Serial.print("Multi-turn Angle:");
                 // Check for overflow

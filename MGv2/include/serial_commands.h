@@ -1,5 +1,7 @@
 #pragma once
 #include "motor_protocol.h"
+#include "motor_operations.h"
+#include "motor_control.h"
 #include "calibration.h"
 #include "config.h"
 #include "output_mode.h"  // Shared output mode definitions
@@ -31,7 +33,8 @@ String formatMotorData(const MotorStatus& status, int64_t offset) {
     float actualCurrent = (float)status.torqueCurrent * 33.0 / 2048.0;
     data += String(actualCurrent, 2);
     data += " S:";
-    data += status.speed;
+    // Invert speed sign for Motor 2
+    data += (status.motorID == 2) ? -status.speed : status.speed;
     data += " ACC:";
     data += status.acceleration;
     data += " E:";
@@ -40,6 +43,10 @@ String formatMotorData(const MotorStatus& status, int64_t offset) {
 
     // Apply software calibration offset
     int64_t correctedAngle = status.motorAngle - offset;
+    // Invert angle sign for Motor 2
+    if (status.motorID == 2) {
+        correctedAngle = -correctedAngle;
+    }
     float angleDeg = (float)correctedAngle * 0.01;
 
     // Check for overflow (±90 trillion degrees, far beyond practical limits)
@@ -94,7 +101,8 @@ void printDetailedStatus(const MotorStatus& status, int64_t offset) {
     Serial.println(")");
 
     Serial.print("Speed:           ");
-    Serial.print(status.speed);
+    // Invert speed sign for Motor 2
+    Serial.print((status.motorID == 2) ? -status.speed : status.speed);
     Serial.println(" dps");
 
     Serial.print("Acceleration:    ");
@@ -103,11 +111,15 @@ void printDetailedStatus(const MotorStatus& status, int64_t offset) {
 
     Serial.print("Encoder:         ");
     Serial.print(status.encoder);
-    Serial.println(" (0~16383)");
+    Serial.println(" (0~262143)");
 
     Serial.print("Multi-turn Angle:");
     // Apply calibration offset for detailed output
     int64_t detailedCorrectedAngle = status.motorAngle - offset;
+    // Invert angle sign for Motor 2
+    if (status.motorID == 2) {
+        detailedCorrectedAngle = -detailedCorrectedAngle;
+    }
     float detailedAngleDeg = (float)detailedCorrectedAngle * 0.01;
 
     // Check for overflow (±90 trillion degrees, far beyond practical limits)
@@ -135,15 +147,22 @@ void printDetailedStatus(const MotorStatus& status, int64_t offset) {
 // Print help message
 void printHelp() {
     Serial.println("\n=== Available Commands ===");
-    Serial.println("--- Software Calibration (Safe, No ROM Write) ---");
-    Serial.println("CAL_M1 or CAL1        - Calibrate Motor 1 (set current position as zero)");
-    Serial.println("CAL_M2 or CAL2        - Calibrate Motor 2 (set current position as zero)");
-    Serial.println("CAL_ALL or CAL        - Calibrate both motors");
-    Serial.println("CLEAR_CAL             - Clear all calibration offsets");
+    Serial.println("--- Motor Position Control (0xA6) ---");
+    Serial.println("M1:<angle>            - Move Motor 1 to angle (e.g., M1:90, M1:-45)");
+    Serial.println("M2:<angle>            - Move Motor 2 to angle (e.g., M2:180)");
+    Serial.println("STOP                  - Stop all motors (0x80)");
+    Serial.println("");
+    Serial.println("--- ROM Calibration (0x19, writes to motor ROM) ---");
+    Serial.println("CAL_M1 or CAL1        - Calibrate Motor 1 (write zero to ROM)");
+    Serial.println("CAL_M2 or CAL2        - Calibrate Motor 2 (write zero to ROM)");
+    Serial.println("CAL_ALL or CAL        - Calibrate both motors (write zero to ROM)");
+    Serial.println("CLEAR_CAL             - Clear software calibration offsets");
     Serial.println("");
     Serial.println("--- Hardware Zero (ROM Write, Permanent) ---");
     Serial.println("SET_ZERO_M1 or ZERO1  - Set Motor 1 zero to ROM (0x19, needs reboot)");
     Serial.println("SET_ZERO_M2 or ZERO2  - Set Motor 2 zero to ROM (0x19, needs reboot)");
+    Serial.println("SET_OFFSET_M1:<val>   - Write encoder offset to Motor 1 ROM (0x91, 0~65535)");
+    Serial.println("SET_OFFSET_M2:<val>   - Write encoder offset to Motor 2 ROM (0x91, 0~65535)");
     Serial.println("");
     Serial.println("--- WiFi Configuration ---");
     Serial.println("WIFI_CONFIG <SSID> <PASSWORD> - Connect to WiFi and start TCP server");
@@ -154,6 +173,10 @@ void printHelp() {
     Serial.println("MODE_SERIAL           - Output motor data to Serial (default)");
     Serial.println("MODE_WIFI             - Output motor data to WiFi TCP client");
     Serial.println("MODE_BOTH             - Output motor data to both Serial and WiFi");
+    Serial.println("");
+    Serial.println("--- Read Commands ---");
+    Serial.println("SINGLE1               - Read Motor 1 single-turn angle (0x94)");
+    Serial.println("SINGLE2               - Read Motor 2 single-turn angle (0x94)");
     Serial.println("");
     Serial.println("--- Debug Commands ---");
     Serial.println("RESET_M1 or RESET1    - Reset Motor 1 angle (0x95, not implemented)");
@@ -181,6 +204,32 @@ void processSerialCommand(const String& cmd) {
             Serial.println("[OK] Motor 2 zero position set! Please reboot MCU.");
         } else {
             Serial.println("[ERROR] Motor 2 set zero failed!");
+        }
+    }
+    else if (cmd.startsWith("SET_OFFSET_M1:")) {
+        String valueStr = cmd.substring(14);
+        uint16_t offset = (uint16_t)valueStr.toInt();
+        Serial.print("[CMD] Writing encoder offset ");
+        Serial.print(offset);
+        Serial.println(" to Motor 1 ROM (0x91)...");
+        Serial.println("[WARNING] This writes to motor ROM permanently!");
+        if (writeEncoderOffsetToROM(CAN_ID_1, offset)) {
+            Serial.println("[OK] Motor 1 encoder offset written to ROM!");
+        } else {
+            Serial.println("[ERROR] Motor 1 write encoder offset failed!");
+        }
+    }
+    else if (cmd.startsWith("SET_OFFSET_M2:")) {
+        String valueStr = cmd.substring(14);
+        uint16_t offset = (uint16_t)valueStr.toInt();
+        Serial.print("[CMD] Writing encoder offset ");
+        Serial.print(offset);
+        Serial.println(" to Motor 2 ROM (0x91)...");
+        Serial.println("[WARNING] This writes to motor ROM permanently!");
+        if (writeEncoderOffsetToROM(CAN_ID_2, offset)) {
+            Serial.println("[OK] Motor 2 encoder offset written to ROM!");
+        } else {
+            Serial.println("[ERROR] Motor 2 write encoder offset failed!");
         }
     }
     else if (cmd == "RESET_M1" || cmd == "RESET1") {
@@ -212,59 +261,64 @@ void processSerialCommand(const String& cmd) {
         }
     }
     else if (cmd == "CAL_M1" || cmd == "CALIBRATE_M1" || cmd == "CAL1") {
-        Serial.println("[CMD] Calibrating Motor 1 zero position (software offset)...");
-        if (motor1_data_valid) {
-            motor1_angle_offset = motor1_latest_angle;
-            Serial.print("[OK] Motor 1 calibrated! Current angle set to zero (offset = ");
-            Serial.print((float)motor1_angle_offset * 0.01, 2);
-            Serial.println("°)");
-            Serial.println("[INFO] This is a software offset - no ROM write, resets on reboot");
+        Serial.println("[CMD] Calibrating Motor 1 zero position to ROM (0x19)...");
+        Serial.println("[INFO] This writes current position as zero to motor ROM");
+        if (setMotorZeroToROM(CAN_ID_1)) {
+            // Clear software offset since ROM calibration is used
+            motor1_angle_offset = 0;
+            Serial.println("[OK] Motor 1 ROM calibration successful!");
+            Serial.println("[INFO] Zero position saved to motor ROM");
         } else {
-            Serial.println("[ERROR] Motor 1 data not available yet, please wait...");
+            Serial.println("[ERROR] Motor 1 ROM calibration failed!");
         }
     }
     else if (cmd == "CAL_M2" || cmd == "CALIBRATE_M2" || cmd == "CAL2") {
-        Serial.println("[CMD] Calibrating Motor 2 zero position (software offset)...");
-        if (motor2_data_valid) {
-            motor2_angle_offset = motor2_latest_angle;
-            Serial.print("[OK] Motor 2 calibrated! Current angle set to zero (offset = ");
-            Serial.print((float)motor2_angle_offset * 0.01, 2);
-            Serial.println("°)");
-            Serial.println("[INFO] This is a software offset - no ROM write, resets on reboot");
+        Serial.println("[CMD] Calibrating Motor 2 zero position to ROM (0x19)...");
+        Serial.println("[INFO] This writes current position as zero to motor ROM");
+        if (setMotorZeroToROM(CAN_ID_2)) {
+            // Clear software offset since ROM calibration is used
+            motor2_angle_offset = 0;
+            Serial.println("[OK] Motor 2 ROM calibration successful!");
+            Serial.println("[INFO] Zero position saved to motor ROM");
         } else {
-            Serial.println("[ERROR] Motor 2 data not available yet, please wait...");
+            Serial.println("[ERROR] Motor 2 ROM calibration failed!");
         }
     }
     else if (cmd == "CAL_ALL" || cmd == "CALIBRATE" || cmd == "CAL") {
-        Serial.println("[CMD] Calibrating ALL motors (software offset)...");
-        Serial.println("[INFO] Note: CAL_ALL is best implemented in GUI");
-        Serial.println("[INFO] Firmware provides: CAL1, CAL2 as atomic operations");
+        Serial.println("[CMD] Calibrating ALL motors to ROM (0x19)...");
+        Serial.println("[INFO] This writes current positions as zero to motor ROM");
 
-        // Simple implementation: calibrate both if data available
         bool m1_ok = false, m2_ok = false;
 
-        if (motor1_data_valid) {
-            motor1_angle_offset = motor1_latest_angle;
-            Serial.print("[OK] Motor 1 calibrated (offset = ");
-            Serial.print((float)motor1_angle_offset * 0.01, 2);
-            Serial.println("°)");
+        Serial.println("\n--- Motor 1 ---");
+        if (setMotorZeroToROM(CAN_ID_1)) {
+            motor1_angle_offset = 0;
+            Serial.println("[OK] Motor 1 ROM calibration successful!");
             m1_ok = true;
-        }
-
-        if (motor2_data_valid) {
-            motor2_angle_offset = motor2_latest_angle;
-            Serial.print("[OK] Motor 2 calibrated (offset = ");
-            Serial.print((float)motor2_angle_offset * 0.01, 2);
-            Serial.println("°)");
-            m2_ok = true;
-        }
-
-        if (m1_ok && m2_ok) {
-            Serial.println("[OK] All motors calibrated!");
         } else {
-            Serial.println("[WARNING] Some motors not calibrated (data not available)");
+            Serial.println("[ERROR] Motor 1 ROM calibration failed!");
         }
-        Serial.println("[INFO] Software offset - no ROM write, resets on reboot");
+
+        vTaskDelay(pdMS_TO_TICKS(100));  // Small delay between motors
+
+        Serial.println("\n--- Motor 2 ---");
+        if (setMotorZeroToROM(CAN_ID_2)) {
+            motor2_angle_offset = 0;
+            Serial.println("[OK] Motor 2 ROM calibration successful!");
+            m2_ok = true;
+        } else {
+            Serial.println("[ERROR] Motor 2 ROM calibration failed!");
+        }
+
+        Serial.println("\n--- Summary ---");
+        if (m1_ok && m2_ok) {
+            Serial.println("[OK] All motors ROM calibration successful!");
+        } else if (m1_ok || m2_ok) {
+            Serial.println("[WARNING] Partial calibration - some motors failed");
+        } else {
+            Serial.println("[ERROR] All motors ROM calibration failed!");
+        }
+        Serial.println("[INFO] Zero positions saved to motor ROM");
     }
     else if (cmd == "CLEAR_CAL" || cmd == "RESET_CAL") {
         Serial.println("[CMD] Clearing software calibration offsets...");
@@ -274,6 +328,35 @@ void processSerialCommand(const String& cmd) {
     }
     else if (cmd == "HELP") {
         printHelp();
+    }
+    // Read Single-Turn Angle Commands (0x94)
+    else if (cmd == "READ_SINGLE_M1" || cmd == "SINGLE1") {
+        Serial.println("[CMD] Reading Motor 1 single-turn angle (0x94)...");
+        MotorStatus status;
+        if (readMotorAngle(CAN_ID_1, status)) {
+            float singleDeg = (float)status.motorAngle * 0.01f;
+            Serial.print("[OK] Motor 1 single-turn angle: ");
+            Serial.print(singleDeg, 2);
+            Serial.print("° (raw: ");
+            Serial.print((uint32_t)status.motorAngle);
+            Serial.println(")");
+        } else {
+            Serial.println("[ERROR] Failed to read Motor 1 angle");
+        }
+    }
+    else if (cmd == "READ_SINGLE_M2" || cmd == "SINGLE2") {
+        Serial.println("[CMD] Reading Motor 2 single-turn angle (0x94)...");
+        MotorStatus status;
+        if (readMotorAngle(CAN_ID_2, status)) {
+            float singleDeg = (float)status.motorAngle * 0.01f;
+            Serial.print("[OK] Motor 2 single-turn angle: ");
+            Serial.print(singleDeg, 2);
+            Serial.print("° (raw: ");
+            Serial.print((uint32_t)status.motorAngle);
+            Serial.println(")");
+        } else {
+            Serial.println("[ERROR] Failed to read Motor 2 angle");
+        }
     }
     // WiFi Configuration Commands
     else if (cmd.startsWith("WIFI_CONFIG ")) {
@@ -339,5 +422,62 @@ void processSerialCommand(const String& cmd) {
         currentOutputMode = MODE_BOTH;
         Serial.println("[OK] Output mode: BOTH");
         Serial.println("[INFO] Motor data will output to both Serial and WiFi (debug mode)");
+    }
+    // ============================================================================
+    // Motor Position Control Commands (0xA6)
+    // ============================================================================
+    else if (cmd == "STOP") {
+        Serial.println("[CMD] Stopping all motors (0x80)...");
+        bool m1_ok = sendMotorShutdown(CAN_ID_1);
+        bool m2_ok = sendMotorShutdown(CAN_ID_2);
+        if (m1_ok && m2_ok) {
+            Serial.println("[OK] All motors stopped");
+        } else {
+            Serial.print("[WARN] Stop result: M1=");
+            Serial.print(m1_ok ? "OK" : "FAIL");
+            Serial.print(", M2=");
+            Serial.println(m2_ok ? "OK" : "FAIL");
+        }
+    }
+    else if (cmd.startsWith("M1:") || cmd.startsWith("M2:")) {
+        // Parse motor position command: M1:90 or M2:-45
+        uint8_t motorID = (cmd.charAt(1) == '1') ? MOTOR_ID_1 : MOTOR_ID_2;
+        uint32_t canID = (motorID == MOTOR_ID_1) ? CAN_ID_1 : CAN_ID_2;
+
+        String angleStr = cmd.substring(3);
+        float angle = angleStr.toFloat();
+
+        // Determine direction based on sign
+        uint8_t direction = SPIN_CLOCKWISE;
+        if (angle < 0) {
+            direction = SPIN_COUNTER_CLOCKWISE;
+            angle = -angle;  // Make positive
+        }
+
+        // Clamp angle to valid range (0 ~ 359.99)
+        if (angle > 359.99) angle = 359.99;
+
+        Serial.print("[CMD] Motor ");
+        Serial.print(motorID);
+        Serial.print(" -> ");
+        Serial.print(angle, 2);
+        Serial.print(" deg (");
+        Serial.print(direction == SPIN_CLOCKWISE ? "CW" : "CCW");
+        Serial.println(")");
+
+        ControlResponse response;
+        if (moveToAngle(canID, angle, direction, 100, &response)) {
+            Serial.println("[OK] Position command sent");
+            Serial.print("  Response: T=");
+            Serial.print(response.temperature);
+            Serial.print("C, I=");
+            Serial.print(response.torqueCurrent);
+            Serial.print(", S=");
+            Serial.print(response.speed);
+            Serial.print("dps, E=");
+            Serial.println(response.encoder);
+        } else {
+            Serial.println("[ERROR] Position command failed");
+        }
     }
 }

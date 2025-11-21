@@ -10,6 +10,7 @@
 #include "config.h"
 #include "motor_protocol.h"
 #include "motor_operations.h"
+#include "motor_safety.h"
 #include "calibration.h"
 #include "serial_commands.h"
 
@@ -62,6 +63,9 @@ void canReadTask(void *parameter) {
     while (true) {
         // Read Motor 1
         if (readMotorComplete(MOTOR_ID_1, CAN_ID_1, status1)) {
+            // Safety check: use 0x9A error state, send 0x80 shutdown if error
+            checkAndHandleMotorError(MOTOR_ID_1, CAN_ID_1, status1);
+
             // Calculate acceleration from speed change
             uint32_t current_time = millis();
             if (motor1_prev_time > 0) {
@@ -88,6 +92,9 @@ void canReadTask(void *parameter) {
 
         // Read Motor 2
         if (readMotorComplete(MOTOR_ID_2, CAN_ID_2, status2)) {
+            // Safety check: use 0x9A error state, send 0x80 shutdown if error
+            checkAndHandleMotorError(MOTOR_ID_2, CAN_ID_2, status2);
+
             // Calculate acceleration from speed change
             uint32_t current_time = millis();
             if (motor2_prev_time > 0) {

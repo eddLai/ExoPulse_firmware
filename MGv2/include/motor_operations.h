@@ -1,6 +1,7 @@
 #pragma once
 #include "motor_protocol.h"
 #include <mcp_can.h>
+#include <cstring>  // for memcpy
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -90,24 +91,29 @@ bool readMotorStatus1(uint32_t canID, MotorStatus& status) {
     return true;
 }
 
-// Read motor angle (using single-turn mode 0x94)
+// Read motor angle (using multi-turn mode 0x92)
+// Returns multi-turn angle (int64_t, supports positive/negative, no wrap)
 bool readMotorAngle(uint32_t canID, MotorStatus& status) {
-    if (!sendReadCommand(canID, READ_SINGLE_ANGLE)) {
+    if (!sendReadCommand(canID, READ_MULTI_ANGLE)) {
         return false;
     }
 
     uint8_t rxData[8];
-    if (!readMotorResponse(canID, READ_SINGLE_ANGLE, rxData, 50)) {
+    if (!readMotorResponse(canID, READ_MULTI_ANGLE, rxData, 50)) {
         return false;
     }
 
-    // Single-turn angle is uint32_t in rxData[4-7], unit: 0.01°/LSB
-    // Range: 0 ~ 36000*gear_ratio - 1 (cycles back to 0 after full rotation)
-    uint32_t singleAngle = (uint32_t)(rxData[4] | (rxData[5] << 8) |
-                                      (rxData[6] << 16) | (rxData[7] << 24));
+    // Multi-turn angle is int64_t in rxData[1-7] (7 bytes), unit: 0.01°/LSB
+    // Positive = clockwise accumulated, Negative = counter-clockwise accumulated
+    int64_t motorAngle = 0;
+    // Copy 7 bytes from rxData[1-7] to motorAngle (little-endian)
+    memcpy(&motorAngle, &rxData[1], 7);
+    // Sign extend if bit 55 is set (negative value in 7-byte representation)
+    if (rxData[7] & 0x80) {
+        motorAngle |= 0xFF00000000000000LL;  // Set upper byte for sign extension
+    }
 
-    // Convert to int64_t for compatibility with existing structure
-    status.motorAngle = (int64_t)singleAngle;
+    status.motorAngle = motorAngle;
 
     return true;
 }
@@ -160,4 +166,43 @@ bool readMotorComplete(uint8_t motorID, uint32_t canID, MotorStatus& status) {
     }
 
     return success;
+}
+
+// ============================================================================
+// Motor Control Commands (Write Operations)
+// ============================================================================
+
+// Send motor shutdown command (0x80)
+// Shuts down motor, clears running state and previous control instructions
+bool sendMotorShutdown(uint32_t canID) {
+    uint8_t txData[8] = {MOTOR_SHUTDOWN, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+    if (xSemaphoreTake(canMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        byte rc = CAN.sendMsgBuf(canID, 0, 8, txData);
+        xSemaphoreGive(canMutex);
+
+        if (rc == CAN_OK) {
+            // Wait for response (motor echoes the command back)
+            uint8_t rxData[8];
+            return readMotorResponse(canID, MOTOR_SHUTDOWN, rxData, 50);
+        }
+    }
+    return false;
+}
+
+// Send motor stop command (0x81)
+// Stops motor but keeps it enabled
+bool sendMotorStop(uint32_t canID) {
+    uint8_t txData[8] = {MOTOR_STOP, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+    if (xSemaphoreTake(canMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        byte rc = CAN.sendMsgBuf(canID, 0, 8, txData);
+        xSemaphoreGive(canMutex);
+
+        if (rc == CAN_OK) {
+            uint8_t rxData[8];
+            return readMotorResponse(canID, MOTOR_STOP, rxData, 50);
+        }
+    }
+    return false;
 }

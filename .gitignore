@@ -48,3 +48,6 @@ Thumbs.db
 *.tmp
 *.temp
 *.log
+
+# Test datasets
+test/offline_dataset/

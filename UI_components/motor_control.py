@@ -21,6 +21,7 @@ import queue
 import time
 import sys
 import re
+import subprocess
 from datetime import datetime
 from collections import deque
 from pathlib import Path
@@ -964,6 +965,9 @@ class ExoPulseGUI(QMainWindow):
         self.recording = False
         self.in_demo = False
         self.log_lines = []
+        self.emg_process = None
+        self.demo_thread = None
+        self.demo_stop_event = threading.Event()
 
         # Threading control
         self.stop_udp_evt = threading.Event()
@@ -1053,6 +1057,11 @@ class ExoPulseGUI(QMainWindow):
 
         # X-axis time window for plots (seconds)
         self.plot_time_window = 10  # Default: 10 seconds
+
+        # Note: 新版 firmware 直接輸出度數，不需要角度展開處理
+        # (保留變數以相容舊程式碼，但不再使用)
+        # self.prev_raw_angle = {1: None, 2: None}
+        # self.angle_turns = {1: 0, 2: 0}
 
         # Build UI
         self.setWindowTitle("ExoPulse Enhanced Controller")
@@ -1486,7 +1495,7 @@ class ExoPulseGUI(QMainWindow):
             ('current', 'Current', 'A', 'cyan', 'orange'),
             ('speed', 'Speed', 'rad/s', 'cyan', 'orange'),
             ('acceleration', 'Acceleration', 'dps²', 'cyan', 'orange'),
-            ('angle', 'Angle', '0.1 deg', 'cyan', 'orange'),
+            ('angle', 'Angle', '°', 'cyan', 'orange'),
         ]
 
         for key, title, ylabel, color1, color2 in plot_configs:
@@ -1570,15 +1579,15 @@ class ExoPulseGUI(QMainWindow):
                     if len(values) > 0:
                         val_min, val_max = min(values), max(values)
                         val_range = val_max - val_min
-                        
-                        # Only auto-scale if there's significant variation
+
                         if val_range > 0.01:
-                            margin = val_range * 0.2 + (5 if key in ['angle', 'acceleration'] else 0.1)
+                            # 自動縮放 (適用於所有圖表，包括 angle)
+                            margin = val_range * 0.2 + (5 if key == 'acceleration' else 0.1)
                             ax.set_ylim(val_min - margin, val_max + margin)
                         else:
                             # For stable values, show small range around the value
                             center = (val_min + val_max) / 2
-                            offset = 1 if key in ['angle', 'acceleration'] else 0.1
+                            offset = 1 if key == 'acceleration' else 0.1
                             ax.set_ylim(center - offset, center + offset)
 
         # Update status text
@@ -1620,9 +1629,19 @@ class ExoPulseGUI(QMainWindow):
 
     def _calibrate_motor(self, motor_id):
         """Calibrate motor zero position"""
+        # 重置包計數器 (新版 firmware 直接處理角度，不需重置角度展開狀態)
+        if motor_id == 1:
+            self.packets_received[1] = 0
+        elif motor_id == 2:
+            self.packets_received[2] = 0
+        elif motor_id == 0:
+            self.packets_received = {1: 0, 2: 0}
+
+        # 嘗試發送校準命令到 ESP32
         try:
             with self.serial_lock:
                 if self.ser and self.ser.is_open:
+                    # Serial 模式
                     if motor_id == 1:
                         self.ser.write(b"CAL1\n")
                         self.ser.flush()
@@ -1638,10 +1657,21 @@ class ExoPulseGUI(QMainWindow):
                         self.ser.write(b"CAL2\n")
                         self.ser.flush()
                         self._log("✓ Calibrating BOTH motors...")
+                elif self.tcp_sock:
+                    # WiFi 模式 - 通過 TCP 發送
+                    if motor_id == 1:
+                        self.tcp_sock.send(b"CAL1\n")
+                        self._log("✓ Calibrating Motor 1 via WiFi...")
+                    elif motor_id == 2:
+                        self.tcp_sock.send(b"CAL2\n")
+                        self._log("✓ Calibrating Motor 2 via WiFi...")
+                    elif motor_id == 0:
+                        self.tcp_sock.send(b"CAL\n")
+                        self._log("✓ Calibrating BOTH motors via WiFi...")
                 else:
-                    self._log("✗ Serial port not connected")
+                    self._log("⚠ No connection, local angle reset only")
         except Exception as e:
-            self._log(f"✗ Calibration failed: {e}")
+            self._log(f"⚠ Calibration command failed: {e}")
 
     def _clear_calibration(self):
         """Clear calibration offsets"""
@@ -1917,6 +1947,38 @@ class ExoPulseGUI(QMainWindow):
         except Exception as e:
             self._log(f"Ping send error: {e}")
 
+    def _track_packet_loss(self, motor_id: int, seq: int):
+        """
+        Unified packet loss tracking for both UART and WiFi modes.
+        Reuses seq from _parse_motor_line() to avoid duplicate parsing.
+        """
+        if motor_id == 1:
+            self.motor1_packets_received += 1
+            if self.last_motor1_seq is not None:
+                expected_seq = (self.last_motor1_seq + 1) % (2**32)
+                if seq != expected_seq:
+                    if seq > expected_seq:
+                        lost = seq - expected_seq
+                    else:
+                        lost = (2**32 - expected_seq) + seq
+                    self.motor1_packets_lost += lost
+            self.last_motor1_seq = seq
+
+        elif motor_id == 2:
+            self.motor2_packets_received += 1
+            if self.last_motor2_seq is not None:
+                expected_seq = (self.last_motor2_seq + 1) % (2**32)
+                if seq != expected_seq:
+                    if seq > expected_seq:
+                        lost = seq - expected_seq
+                    else:
+                        lost = (2**32 - expected_seq) + seq
+                    self.motor2_packets_lost += lost
+            self.last_motor2_seq = seq
+
+        # Update display
+        self._update_packet_loss_display()
+
     def _update_packet_loss_display(self):
         """Update packet loss statistics display"""
         if not self.test_running:
@@ -2078,38 +2140,8 @@ class ExoPulseGUI(QMainWindow):
                                                 # Update latency display
                                                 self._update_latency_display()
 
-                                        # Parse motor data with SEQ field for packet loss tracking
-                                        motor_match = re.search(r'\[(\d+)\]\s+SEQ:(\d+)\s+M:(\d+)', line)
-                                        if motor_match:
-                                            seq = int(motor_match.group(2))
-                                            motor_id = int(motor_match.group(3))
-
-                                            if motor_id == 1:
-                                                self.motor1_packets_received += 1
-                                                if self.last_motor1_seq is not None:
-                                                    expected_seq = (self.last_motor1_seq + 1) % (2**32)
-                                                    if seq != expected_seq:
-                                                        if seq > expected_seq:
-                                                            lost = seq - expected_seq
-                                                        else:
-                                                            lost = (2**32 - expected_seq) + seq
-                                                        self.motor1_packets_lost += lost
-                                                self.last_motor1_seq = seq
-
-                                            elif motor_id == 2:
-                                                self.motor2_packets_received += 1
-                                                if self.last_motor2_seq is not None:
-                                                    expected_seq = (self.last_motor2_seq + 1) % (2**32)
-                                                    if seq != expected_seq:
-                                                        if seq > expected_seq:
-                                                            lost = seq - expected_seq
-                                                        else:
-                                                            lost = (2**32 - expected_seq) + seq
-                                                        self.motor2_packets_lost += lost
-                                                self.last_motor2_seq = seq
-
-                                            # Update packet loss display
-                                            self._update_packet_loss_display()
+                                    # NOTE: Packet loss tracking moved to _pump_data_queue()
+                                    # to reuse _parse_motor_line() and support both UART/WiFi modes
 
                     except socket.timeout:
                         continue
@@ -2212,6 +2244,21 @@ class ExoPulseGUI(QMainWindow):
         threading.Thread(target=listener, daemon=True).start()
 
     # ========== Data Processing ==========
+    def _unwrap_angle(self, motor_id, raw_angle):
+        """
+        處理角度值
+
+        新版 firmware 直接輸出度數 (°)，且已處理多圈追蹤
+        raw_angle: 角度值 (單位: 度 °)
+        回傳: 角度值 (單位: 度 °)
+
+        注意: 舊版 firmware 輸出 0.1° 單位，需要 * 0.1 轉換
+              新版 firmware 直接輸出度數，不需轉換
+        """
+        # 新版 firmware: 直接輸出度數，已包含多圈追蹤
+        # 直接回傳，不需要額外處理
+        return raw_angle
+
     def _parse_motor_line(self, line):
         """Parse CAN motor data line"""
         if not line.startswith('['):
@@ -2299,6 +2346,10 @@ class ExoPulseGUI(QMainWindow):
                             self._log("✓ Motor data parsing started")
                         motor_id = status['motor_id']
                         if motor_id in [1, 2]:
+                            # Unified packet loss tracking (works for both UART and WiFi)
+                            if 'seq' in status and self.test_running:
+                                self._track_packet_loss(motor_id, status['seq'])
+
                             # Filter initial unstable packets (skip first N packets per motor)
                             self.packets_received[motor_id] += 1
                             if self.packets_received[motor_id] <= self.skip_initial_packets:
@@ -2312,7 +2363,9 @@ class ExoPulseGUI(QMainWindow):
                             data['current'].append(status['current'])
                             data['speed'].append(status['speed'])
                             data['acceleration'].append(status['acceleration'])
-                            data['angle'].append(status['angle'])
+                            # 使用角度展開，轉換為度 (°)
+                            unwrapped_angle = self._unwrap_angle(motor_id, status['angle'])
+                            data['angle'].append(unwrapped_angle)
 
                 # Try to parse as general data
                 if "] X " in msg:
@@ -2415,17 +2468,83 @@ class ExoPulseGUI(QMainWindow):
         self._log("✓ Swing complete")
 
     def _toggle_demo_mode(self):
-        """Toggle demo mode"""
+        """Toggle demo mode - launches EMG plotter and simulation control"""
         if not self.in_demo:
-            self._send(*make_motor_packet("G", 0, "G", 0))
+            self._start_demo()
+        else:
+            self._stop_demo()
+
+    def _start_demo(self):
+        """Start demo mode with EMG plotter"""
+        try:
+            # Launch EMG plotter in separate process
+            ui_dir = Path(__file__).parent
+            emg_script = ui_dir / "emg_plotter.py"
+            
+            if emg_script.exists():
+                # Find available serial port for EMG plotter
+                import glob
+                available_ports = glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*')
+                
+                if available_ports:
+                    emg_port = available_ports[0]
+                    self._log(f"📊 Launching EMG Plotter on {emg_port}")
+                    self.emg_process = subprocess.Popen(
+                        [sys.executable, str(emg_script), '--port', emg_port],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                else:
+                    self._log("⚠ No serial port available for EMG Plotter")
+            else:
+                self._log(f"⚠ EMG script not found: {emg_script}")
+            
+            # Prepare for simulation control thread (待實現)
+            self.demo_stop_event.clear()
+            # TODO: self.demo_thread = threading.Thread(target=self._run_simulation_control, daemon=True)
+            # TODO: self.demo_thread.start()
+            
             self._log("🚶 Demo started")
             self.btn_demo.setText("Stop Demo")
             self.in_demo = True
-        else:
+            
+        except Exception as e:
+            self._log(f"⚠ Demo start error: {e}")
+            import traceback
+            self._log(f"Details: {traceback.format_exc()}")
+
+    def _stop_demo(self):
+        """Stop demo mode"""
+        try:
+            # Stop simulation control thread
+            self.demo_stop_event.set()
+            if self.demo_thread:
+                self.demo_thread.join(timeout=1.0)
+                self.demo_thread = None
+            
+            # Terminate EMG plotter
+            if self.emg_process:
+                self.emg_process.terminate()
+                try:
+                    self.emg_process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    self.emg_process.kill()
+                self.emg_process = None
+                self._log("📊 EMG Plotter closed")
+            
             self._send_stop()
             self._log("🛑 Demo stopped")
             self.btn_demo.setText("Start Demo")
             self.in_demo = False
+            
+        except Exception as e:
+            self._log(f"⚠ Demo stop error: {e}")
+    
+    def _run_simulation_control(self):
+        """Simulation control thread - 待你提供 torque/degree 控制邏輯"""
+        # TODO: 在這裡實現模擬控制邏輯
+        # 當你提供 torque 或 degree 控制指令後，會在這裡實現
+        pass
 
     def _toggle_record(self):
         """Toggle recording"""
