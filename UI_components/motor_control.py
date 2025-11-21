@@ -158,8 +158,14 @@ class WiFiConfigDialog(QWidget):
         self.esp32_ip = None
         self.esp32_port = 8888
 
+        # WiFi status tracking
+        self.wifi_connected = False
+        self.wifi_ssid = ""
+        self.wifi_rssi = ""
+        self.wifi_mac = ""
+
         self.setWindowTitle("WiFi Configuration")
-        self.setFixedSize(650, 450)
+        self.setFixedSize(650, 500)
         self.setStyleSheet("""
             QWidget {
                 background-color: #2C3E50;
@@ -215,13 +221,48 @@ class WiFiConfigDialog(QWidget):
         layout.setSpacing(15)
 
         # Title
-        title = QLabel("ESP32 WiFi Configuration")
+        title = QLabel("ESP32 WiFi Manager")
         title.setStyleSheet("font-size: 16pt; font-weight: bold; color: #3498DB; padding: 10px;")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
-        # WiFi credentials
-        cred_group = QGroupBox("WiFi Credentials")
+        # === Current Status Group (shown when connected) ===
+        self.status_group = QGroupBox("Current WiFi Status")
+        status_layout = QVBoxLayout()
+
+        # Connection indicator with color
+        indicator_row = QHBoxLayout()
+        self.status_indicator = QLabel("●")
+        self.status_indicator.setStyleSheet("font-size: 18pt; color: #2ECC71; padding: 0px;")  # Green dot
+        indicator_row.addWidget(self.status_indicator)
+        self.status_text = QLabel("Connected")
+        self.status_text.setStyleSheet("font-size: 12pt; font-weight: bold; color: #2ECC71; padding: 3px;")
+        indicator_row.addWidget(self.status_text)
+        indicator_row.addStretch()
+        status_layout.addLayout(indicator_row)
+
+        # Status info display
+        self.status_ssid_label = QLabel("SSID: --")
+        self.status_ssid_label.setStyleSheet("font-size: 11pt; padding: 3px;")
+        status_layout.addWidget(self.status_ssid_label)
+
+        self.status_ip_label = QLabel("IP Address: --")
+        self.status_ip_label.setStyleSheet("font-size: 11pt; padding: 3px;")
+        status_layout.addWidget(self.status_ip_label)
+
+        self.status_mac_label = QLabel("MAC Address: --")
+        self.status_mac_label.setStyleSheet("font-size: 10pt; color: #95A5A6; padding: 3px;")
+        status_layout.addWidget(self.status_mac_label)
+
+        self.status_rssi_label = QLabel("Signal Strength: --")
+        self.status_rssi_label.setStyleSheet("font-size: 10pt; padding: 3px;")
+        status_layout.addWidget(self.status_rssi_label)
+
+        self.status_group.setLayout(status_layout)
+        layout.addWidget(self.status_group)
+
+        # === WiFi Configuration Group (shown when not connected) ===
+        self.config_group = QGroupBox("WiFi Configuration")
         cred_layout = QVBoxLayout()
 
         ssid_row = QHBoxLayout()
@@ -241,8 +282,8 @@ class WiFiConfigDialog(QWidget):
         pass_row.addWidget(self.password_input)
         cred_layout.addLayout(pass_row)
 
-        cred_group.setLayout(cred_layout)
-        layout.addWidget(cred_group)
+        self.config_group.setLayout(cred_layout)
+        layout.addWidget(self.config_group)
 
         # Log display
         self.log_text = QTextEdit()
@@ -250,17 +291,61 @@ class WiFiConfigDialog(QWidget):
         self.log_text.setStyleSheet("background-color: #34495E; color: #ECF0F1; font-family: monospace; border: 1px solid #566573; border-radius: 3px;")
         layout.addWidget(self.log_text)
 
-        # Buttons
+        # === Action Buttons ===
         button_layout = QHBoxLayout()
 
+        # Disconnect button (shown when connected)
+        self.disconnect_btn = QPushButton("🔌 Disconnect")
+        self.disconnect_btn.setMinimumHeight(40)
+        self.disconnect_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #E67E22, stop:1 #D35400);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #F39C12, stop:1 #E67E22);
+            }
+        """)
+        self.disconnect_btn.clicked.connect(self._start_disconnect)
+        button_layout.addWidget(self.disconnect_btn)
+
+        # Configure button (shown when not connected)
         self.configure_btn = QPushButton("⚙ Configure WiFi")
         self.configure_btn.setMinimumHeight(40)
         self.configure_btn.clicked.connect(self._start_configuration)
         button_layout.addWidget(self.configure_btn)
 
+        # Reconfigure button (shown when connected)
+        self.reconfig_btn = QPushButton("🔄 Reconfigure")
+        self.reconfig_btn.setMinimumHeight(40)
+        self.reconfig_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #F39C12, stop:1 #E67E22);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #F5AB35, stop:1 #F39C12);
+            }
+        """)
+        self.reconfig_btn.clicked.connect(self._start_reconfiguration)
+        button_layout.addWidget(self.reconfig_btn)
+
+        # Test button
         self.test_btn = QPushButton("🔍 Test Connection")
         self.test_btn.setMinimumHeight(40)
-        self.test_btn.setEnabled(False)  # Disabled until configuration succeeds
+        self.test_btn.setEnabled(False)
         self.test_btn.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -283,6 +368,7 @@ class WiFiConfigDialog(QWidget):
         self.test_btn.clicked.connect(self._test_connection)
         button_layout.addWidget(self.test_btn)
 
+        # Close button
         self.close_btn = QPushButton("✕ Close")
         self.close_btn.setMinimumHeight(40)
         self.close_btn.setStyleSheet("""
@@ -305,6 +391,21 @@ class WiFiConfigDialog(QWidget):
 
         layout.addLayout(button_layout)
 
+        # Initially hide all - will be shown after status check
+        self.status_group.hide()
+        self.config_group.hide()
+        self.disconnect_btn.hide()
+        self.configure_btn.hide()
+        self.reconfig_btn.hide()
+
+    def showEvent(self, event):
+        """Called when dialog is shown - check WiFi status first"""
+        super().showEvent(event)
+        # Check status on first show
+        import threading
+        self._log("🔍 Checking current WiFi status...")
+        threading.Thread(target=self._check_wifi_status, daemon=True).start()
+
     def _log(self, message):
         """Add log message (thread-safe)"""
         from PySide6.QtCore import QMetaObject, Q_ARG
@@ -313,6 +414,254 @@ class WiFiConfigDialog(QWidget):
             "append",
             Qt.QueuedConnection,
             Q_ARG(str, message)
+        )
+
+    def _check_wifi_status(self):
+        """Check current WiFi status via serial"""
+        import serial as ser_module
+        import time
+        import re
+
+        try:
+            # Open serial port
+            self._log(f"Opening {self.serial_port}...")
+            self.ser = ser_module.Serial(self.serial_port, 115200, timeout=2)
+            time.sleep(0.5)
+
+            # Clear input buffer
+            self.ser.reset_input_buffer()
+            self._log("Sending WIFI_STATUS command...")
+
+            # Send WIFI_STATUS command
+            self.ser.write(b"WIFI_STATUS\n")
+            self.ser.flush()
+
+            # Read response
+            start_time = time.time()
+            status_connected = False
+            ssid = ""
+            ip_address = ""
+            mac_address = ""
+            rssi = ""
+
+            while time.time() - start_time < 3:
+                if self.ser.in_waiting:
+                    line = self.ser.readline().decode(errors='ignore').strip()
+                    if line:
+                        # Check for connection status
+                        if "Status: Connected" in line or "WiFi] Status: Connected" in line:
+                            status_connected = True
+                        elif "Status: Not connected" in line or "WiFi] Status: Not connected" in line:
+                            status_connected = False
+
+                        # Parse SSID
+                        if "SSID:" in line:
+                            match = re.search(r'SSID:\s*(\S+)', line)
+                            if match:
+                                ssid = match.group(1)
+
+                        # Parse IP address
+                        if "IP Address:" in line or "IP:" in line:
+                            match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
+                            if match:
+                                ip_address = match.group(1)
+
+                        # Parse MAC address
+                        if "MAC Address:" in line:
+                            match = re.search(r'MAC Address:\s*([0-9A-Fa-f:]+)', line)
+                            if match:
+                                mac_address = match.group(1)
+
+                        # Parse RSSI
+                        if "RSSI:" in line or "Signal Strength" in line:
+                            match = re.search(r'(-?\d+)\s*dBm', line)
+                            if match:
+                                rssi = match.group(1) + " dBm"
+
+            self.ser.close()
+
+            # Update internal state
+            self.wifi_connected = status_connected
+            self.wifi_ssid = ssid
+            self.esp32_ip = ip_address if ip_address else None
+            self.wifi_mac = mac_address
+            self.wifi_rssi = rssi
+
+            # Log results
+            if status_connected:
+                self._log(f"✓ WiFi is connected")
+                self._log(f"  SSID: {ssid}")
+                self._log(f"  IP: {ip_address}")
+                self._log(f"  RSSI: {rssi}")
+            else:
+                self._log("ℹ WiFi is not connected")
+
+            # Update UI based on status
+            self._update_ui_for_status()
+
+        except Exception as e:
+            self._log(f"✗ Error checking status: {e}")
+            # Assume not connected on error
+            self.wifi_connected = False
+            self._update_ui_for_status()
+
+    def _update_ui_for_status(self):
+        """Update UI based on WiFi connection status (thread-safe)"""
+        from PySide6.QtCore import QMetaObject, Q_ARG
+
+        if self.wifi_connected:
+            # Show status group, hide config group
+            QMetaObject.invokeMethod(self.status_group, "show", Qt.QueuedConnection)
+            QMetaObject.invokeMethod(self.config_group, "hide", Qt.QueuedConnection)
+
+            # Update status labels
+            QMetaObject.invokeMethod(
+                self.status_ssid_label, "setText", Qt.QueuedConnection,
+                Q_ARG(str, f"SSID: {self.wifi_ssid}")
+            )
+            QMetaObject.invokeMethod(
+                self.status_ip_label, "setText", Qt.QueuedConnection,
+                Q_ARG(str, f"IP Address: {self.esp32_ip}")
+            )
+            QMetaObject.invokeMethod(
+                self.status_mac_label, "setText", Qt.QueuedConnection,
+                Q_ARG(str, f"MAC Address: {self.wifi_mac}")
+            )
+            QMetaObject.invokeMethod(
+                self.status_rssi_label, "setText", Qt.QueuedConnection,
+                Q_ARG(str, f"Signal Strength: {self.wifi_rssi}")
+            )
+
+            # Show disconnect and reconfigure buttons, hide configure button
+            QMetaObject.invokeMethod(self.disconnect_btn, "show", Qt.QueuedConnection)
+            QMetaObject.invokeMethod(self.reconfig_btn, "show", Qt.QueuedConnection)
+            QMetaObject.invokeMethod(self.configure_btn, "hide", Qt.QueuedConnection)
+
+            # Enable test button
+            QMetaObject.invokeMethod(
+                self.test_btn, "setEnabled", Qt.QueuedConnection,
+                Q_ARG(bool, True)
+            )
+
+        else:
+            # Show config group, hide status group
+            QMetaObject.invokeMethod(self.status_group, "hide", Qt.QueuedConnection)
+            QMetaObject.invokeMethod(self.config_group, "show", Qt.QueuedConnection)
+
+            # Show configure button, hide disconnect and reconfigure buttons
+            QMetaObject.invokeMethod(self.configure_btn, "show", Qt.QueuedConnection)
+            QMetaObject.invokeMethod(self.disconnect_btn, "hide", Qt.QueuedConnection)
+            QMetaObject.invokeMethod(self.reconfig_btn, "hide", Qt.QueuedConnection)
+
+            # Disable test button
+            QMetaObject.invokeMethod(
+                self.test_btn, "setEnabled", Qt.QueuedConnection,
+                Q_ARG(bool, False)
+            )
+
+    def _start_disconnect(self):
+        """Start WiFi disconnection"""
+        import threading
+        self.disconnect_btn.setEnabled(False)
+        self._log("Disconnecting WiFi...")
+        threading.Thread(target=self._disconnect_wifi, daemon=True).start()
+
+    def _disconnect_wifi(self):
+        """Disconnect from WiFi (runs in thread)"""
+        import serial as ser_module
+        import time
+
+        try:
+            # Open serial port
+            self._log(f"Opening {self.serial_port}...")
+            self.ser = ser_module.Serial(self.serial_port, 115200, timeout=2)
+            time.sleep(0.5)
+
+            # Clear input buffer
+            self.ser.reset_input_buffer()
+            self._log("Sending WIFI_DISCONNECT command...")
+
+            # Send WIFI_DISCONNECT command
+            self.ser.write(b"WIFI_DISCONNECT\n")
+            self.ser.flush()
+
+            # Read response
+            start_time = time.time()
+            disconnect_ok = False
+
+            while time.time() - start_time < 3:
+                if self.ser.in_waiting:
+                    line = self.ser.readline().decode(errors='ignore').strip()
+                    if line:
+                        # Log WiFi-related messages
+                        if any(keyword in line for keyword in ['WiFi', 'WIFI', 'CMD', 'disconnect', 'Disconnect']):
+                            self._log(line)
+                            if "disconnected" in line.lower() or "OK" in line:
+                                disconnect_ok = True
+
+            self.ser.close()
+
+            if disconnect_ok:
+                self._log("✓ WiFi disconnected successfully")
+            else:
+                self._log("ℹ WiFi disconnect command sent")
+
+            # Update state
+            self.wifi_connected = False
+            self.wifi_ssid = ""
+            self.esp32_ip = None
+            self.wifi_mac = ""
+            self.wifi_rssi = ""
+
+            # Update UI
+            self._update_ui_for_status()
+
+            # Re-enable button
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(
+                self.disconnect_btn,
+                "setEnabled",
+                Qt.QueuedConnection,
+                Q_ARG(bool, True)
+            )
+
+        except Exception as e:
+            self._log(f"✗ Error disconnecting: {e}")
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(
+                self.disconnect_btn,
+                "setEnabled",
+                Qt.QueuedConnection,
+                Q_ARG(bool, True)
+            )
+
+    def _start_reconfiguration(self):
+        """Start reconfiguration (disconnect then configure)"""
+        import threading
+        self.reconfig_btn.setEnabled(False)
+        self._log("Reconfiguring WiFi (will disconnect first)...")
+        threading.Thread(target=self._reconfigure_wifi, daemon=True).start()
+
+    def _reconfigure_wifi(self):
+        """Reconfigure WiFi by disconnecting then showing config UI"""
+        import time
+
+        # First disconnect
+        self._disconnect_wifi()
+        time.sleep(1)
+
+        # Switch UI to configuration mode
+        self.wifi_connected = False
+        self._update_ui_for_status()
+        self._log("ℹ Ready to configure new WiFi network")
+
+        # Re-enable button
+        from PySide6.QtCore import QMetaObject, Q_ARG
+        QMetaObject.invokeMethod(
+            self.reconfig_btn,
+            "setEnabled",
+            Qt.QueuedConnection,
+            Q_ARG(bool, True)
         )
 
     def _start_configuration(self):
@@ -370,19 +719,12 @@ class WiFiConfigDialog(QWidget):
 
             if ip_address:
                 self._log("✓ WiFi configuration successful!")
-                self._log(f"ℹ You can now test the connection using the 'Test Connection' button")
                 self.esp32_ip = ip_address
+                self.wifi_ssid = ssid
+                self.wifi_connected = True
 
-                # Enable test button
+                # Re-enable configure button
                 from PySide6.QtCore import QMetaObject, Q_ARG
-                QMetaObject.invokeMethod(
-                    self.test_btn,
-                    "setEnabled",
-                    Qt.QueuedConnection,
-                    Q_ARG(bool, True)
-                )
-
-                # Re-enable configure button for re-configuration if needed
                 QMetaObject.invokeMethod(
                     self.configure_btn,
                     "setEnabled",
@@ -390,15 +732,29 @@ class WiFiConfigDialog(QWidget):
                     Q_ARG(bool, True)
                 )
 
-                # Don't auto-close, let user test first
-                # self.close()
+                # Check full WiFi status to get MAC, RSSI, etc.
+                self._log("Fetching complete WiFi status...")
+                time.sleep(1)
+                self._check_wifi_status()
+
             else:
                 self._log("✗ Failed to get IP address")
-                self.configure_btn.setEnabled(True)
+                QMetaObject.invokeMethod(
+                    self.configure_btn,
+                    "setEnabled",
+                    Qt.QueuedConnection,
+                    Q_ARG(bool, True)
+                )
 
         except Exception as e:
             self._log(f"✗ Error: {e}")
-            self.configure_btn.setEnabled(True)
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(
+                self.configure_btn,
+                "setEnabled",
+                Qt.QueuedConnection,
+                Q_ARG(bool, True)
+            )
 
     def _on_close(self):
         """Handle close button - emit signal if configured successfully"""
@@ -1784,8 +2140,8 @@ class ExoPulseGUI(QMainWindow):
         if not line.startswith('['):
             return None
 
-        # Remove prefix like [UART], [WiFi], [IMU] if present
-        line = re.sub(r'^\[(UART|WiFi|IMU)[^\]]*\]\s*', '', line)
+        # Remove prefix like [UART], [WiFi], [TCP], [IMU] if present
+        line = re.sub(r'^\[(UART|WiFi|TCP|IMU)[^\]]*\]\s*', '', line)
 
         try:
             # Try new format with SEQ field first: [timestamp] SEQ:xxx M:x T:xx ...
