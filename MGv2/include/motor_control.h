@@ -304,3 +304,152 @@ bool setMotor2Torque(int16_t iqValue) {
 
     return success;
 }
+
+// ============================================================================
+// Position Control Command 0xA4 (Multi-turn absolute position with speed limit)
+// ============================================================================
+// TX: [0xA4] [0x00] [maxSpeed_L] [maxSpeed_H] [angle_L] [angle_ML] [angle_MH] [angle_H]
+// RX: [0xA4] [temp] [iq_L] [iq_H] [speed_L] [speed_H] [encoder_L] [encoder_H]
+//
+// angleControl: int32_t, 0.01°/LSB (e.g., 36000 = 360°, -18000 = -180°)
+// maxSpeed: uint16_t, 1 dps/LSB (max speed limit for this motion)
+//
+// Range: ±35999999 (represents ±359999.99°, about ±1000 turns)
+// Direction: Determined by the difference between target and current position
+
+#define DEFAULT_MULTI_TURN_MAX_SPEED 700  // Default max speed in dps (based on exo data analysis)
+#define MOTOR_GEAR_RATIO 10  // MG motor gear ratio (output shaft angle * 10 = motor angle)
+
+bool sendPositionControl_A4(uint32_t canID, uint16_t maxSpeed, int32_t angleControl, ControlResponse* response = nullptr) {
+    // Build command data per protocol
+    uint8_t txData[8] = {
+        POS_CTRL_MULTI_2,                           // Byte 0: Command 0xA4
+        0x00,                                        // Byte 1: NULL
+        (uint8_t)(maxSpeed & 0xFF),                 // Byte 2: maxSpeed low byte
+        (uint8_t)((maxSpeed >> 8) & 0xFF),          // Byte 3: maxSpeed high byte
+        (uint8_t)(angleControl & 0xFF),             // Byte 4: angle low byte
+        (uint8_t)((angleControl >> 8) & 0xFF),      // Byte 5: angle mid-low byte
+        (uint8_t)((angleControl >> 16) & 0xFF),     // Byte 6: angle mid-high byte
+        (uint8_t)((angleControl >> 24) & 0xFF)      // Byte 7: angle high byte
+    };
+
+    Serial.print("[CTRL] TX 0xA4: ");
+    for (int i = 0; i < 8; i++) {
+        Serial.print("0x");
+        if (txData[i] < 16) Serial.print("0");
+        Serial.print(txData[i], HEX);
+        Serial.print(" ");
+    }
+    Serial.println();
+
+    // Suspend canReadTask to prevent it from consuming our response
+    vTaskSuspend(canReadTaskHandle);
+
+    // Send command and wait for response atomically
+    bool success = false;
+    if (xSemaphoreTake(canMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        byte rc = CAN.sendMsgBuf(canID, 0, 8, txData);
+
+        if (rc != CAN_OK) {
+            Serial.println("[CTRL] ERROR: CAN send failed");
+            xSemaphoreGive(canMutex);
+            vTaskResume(canReadTaskHandle);
+            return false;
+        }
+
+        // Wait for response (while still holding mutex)
+        uint8_t rxData[8];
+        uint32_t startTime = millis();
+        while (millis() - startTime < 100) {
+            if (CAN.checkReceive() == CAN_MSGAVAIL) {
+                unsigned long rxId;
+                byte len;
+                CAN.readMsgBuf(&rxId, &len, rxData);
+
+                if (rxId == canID && rxData[0] == POS_CTRL_MULTI_2) {
+                    // Parse response
+                    if (response != nullptr) {
+                        response->temperature = (int8_t)rxData[1];
+                        response->torqueCurrent = (int16_t)(rxData[2] | (rxData[3] << 8));
+                        response->speed = (int16_t)(rxData[4] | (rxData[5] << 8));
+                        response->encoder = (uint16_t)(rxData[6] | (rxData[7] << 8));
+                    }
+                    success = true;
+                    break;
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+
+        xSemaphoreGive(canMutex);
+    } else {
+        Serial.println("[CTRL] ERROR: Failed to acquire CAN mutex");
+    }
+
+    // Resume canReadTask
+    vTaskResume(canReadTaskHandle);
+
+    if (!success) {
+        Serial.println("[CTRL] ERROR: No response from motor");
+    }
+    return success;
+}
+
+// Convenience function: Move to absolute multi-turn angle (degrees)
+// angleDegrees: Target angle in degrees (can be negative, multi-turn)
+// maxSpeedDPS: max speed in degrees per second (default: DEFAULT_MULTI_TURN_MAX_SPEED)
+bool moveToMultiTurnAngle(uint32_t canID, float angleDegrees, uint16_t maxSpeedDPS = DEFAULT_MULTI_TURN_MAX_SPEED, ControlResponse* response = nullptr) {
+    // Convert output shaft degrees to motor angle (0.01° units)
+    // Motor angle = Output shaft angle * Gear ratio * 100 (for 0.01° resolution)
+    int32_t angleControl = (int32_t)(angleDegrees * MOTOR_GEAR_RATIO * 100.0f);
+
+    Serial.print("[CTRL] Moving to output angle: ");
+    Serial.print(angleDegrees, 2);
+    Serial.print("° (motor: ");
+    Serial.print(angleDegrees * MOTOR_GEAR_RATIO, 1);
+    Serial.print("°, raw: ");
+    Serial.print(angleControl);
+    Serial.print("), max speed: ");
+    Serial.print(maxSpeedDPS);
+    Serial.println(" dps");
+
+    return sendPositionControl_A4(canID, maxSpeedDPS, angleControl, response);
+}
+
+// Move Motor 1 to multi-turn absolute angle
+bool moveMotor1ToMultiTurnAngle(float angleDegrees, uint16_t maxSpeedDPS = DEFAULT_MULTI_TURN_MAX_SPEED) {
+    ControlResponse response;
+    bool success = moveToMultiTurnAngle(CAN_ID_1, angleDegrees, maxSpeedDPS, &response);
+
+    if (success) {
+        Serial.print("[CTRL] Motor 1 response - Temp: ");
+        Serial.print(response.temperature);
+        Serial.print("°C, Current: ");
+        Serial.print(response.torqueCurrent);
+        Serial.print(", Speed: ");
+        Serial.print(response.speed);
+        Serial.print(" dps, Encoder: ");
+        Serial.println(response.encoder);
+    }
+
+    return success;
+}
+
+// Move Motor 2 to multi-turn absolute angle
+bool moveMotor2ToMultiTurnAngle(float angleDegrees, uint16_t maxSpeedDPS = DEFAULT_MULTI_TURN_MAX_SPEED) {
+    ControlResponse response;
+    bool success = moveToMultiTurnAngle(CAN_ID_2, angleDegrees, maxSpeedDPS, &response);
+
+    if (success) {
+        Serial.print("[CTRL] Motor 2 response - Temp: ");
+        Serial.print(response.temperature);
+        Serial.print("°C, Current: ");
+        Serial.print(response.torqueCurrent);
+        Serial.print(", Speed: ");
+        Serial.print(response.speed);
+        Serial.print(" dps, Encoder: ");
+        Serial.println(response.encoder);
+    }
+
+    return success;
+}

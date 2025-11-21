@@ -3,9 +3,17 @@
 Motor Serial Control - Python script to control motors via ESP32
 Communicates through Serial (115200 baud) to send position commands
 
-Commands:
-    M1:<angle>  - Move Motor 1 to angle (e.g., M1:90, M1:-45)
-    M2:<angle>  - Move Motor 2 to angle (e.g., M2:180)
+Commands (Multi-Turn Absolute Position - 0xA4):
+    P1:<angle>         - Move Motor 1 to absolute angle (e.g., P1:30, P1:-45.5)
+    P2:<angle>         - Move Motor 2 to absolute angle (e.g., P2:90)
+    P1:<angle>:<speed> - Move with speed limit (e.g., P1:30:500)
+                         Supports ±359999.99°, default speed=700 dps
+
+Commands (Single-Turn Position - 0xA6, legacy):
+    M1:<angle>  - Move Motor 1 to angle (0~359.99°)
+    M2:<angle>  - Move Motor 2 to angle
+
+Commands (General):
     STOP        - Stop all motors (0x80)
 
 Usage:
@@ -112,7 +120,7 @@ class MotorController:
 
     def move_motor(self, motor_id, angle):
         """
-        Move motor to specified angle
+        Move motor to specified angle (Single-turn, 0xA6 command)
 
         Args:
             motor_id: 1 or 2
@@ -124,6 +132,29 @@ class MotorController:
             return False
 
         cmd = f"M{motor_id}:{angle}"
+        self.send_command(cmd)
+        responses = self.read_response(timeout=0.5)
+        for r in responses:
+            print(f"RX: {r}")
+        return responses
+
+    def move_motor_multi_turn(self, motor_id, angle, max_speed=700):
+        """
+        Move motor to specified absolute angle (Multi-turn, 0xA4 command)
+
+        Args:
+            motor_id: 1 or 2
+            angle: Target angle in degrees (supports ±359999.99°)
+            max_speed: Maximum speed in dps (default: 700 dps)
+        """
+        if motor_id not in [1, 2]:
+            print("ERROR: motor_id must be 1 or 2")
+            return False
+
+        if max_speed != 700:
+            cmd = f"P{motor_id}:{angle}:{max_speed}"
+        else:
+            cmd = f"P{motor_id}:{angle}"
         self.send_command(cmd)
         responses = self.read_response(timeout=0.5)
         for r in responses:
@@ -221,6 +252,109 @@ class MotorController:
         self.stop_all()
         return True
 
+    def sin_motion_multi_turn(self, motor_id, amplitude=30.0, period=2.0, center=0.0, duration=10.0, max_speed=700, steps_per_period=10):
+        """
+        Execute sinusoidal reciprocating motion using multi-turn position control (0xA4)
+
+        Args:
+            motor_id: 1 or 2
+            amplitude: Peak amplitude in degrees (e.g., 30 means ±30° from center)
+            period: Time for one complete cycle in seconds
+            center: Center position in degrees (can be negative)
+            duration: Total duration of motion in seconds
+            max_speed: Maximum speed limit in dps (default: 700)
+            steps_per_period: Number of position updates per period (default: 10)
+                              Lower = smoother but slower response
+                              Higher = more responsive but may overwhelm motor
+
+        Motion: angle = center + amplitude * sin(2*pi*t/period)
+        Range: [center - amplitude, center + amplitude]
+
+        Note: 0xA4 command supports ±359999.99°, so negative angles are OK!
+        """
+        if motor_id not in [1, 2]:
+            print("ERROR: motor_id must be 1 or 2")
+            return False
+
+        min_angle = center - amplitude
+        max_angle = center + amplitude
+        dt = period / steps_per_period  # Time between updates
+
+        print(f"\n=== Sin Motion (Multi-Turn 0xA4) ===")
+        print(f"  Motor: {motor_id}")
+        print(f"  Center: {center}°")
+        print(f"  Amplitude: ±{amplitude}°")
+        print(f"  Range: [{min_angle:.1f}° ~ {max_angle:.1f}°]")
+        print(f"  Period: {period}s")
+        print(f"  Duration: {duration}s")
+        print(f"  Max Speed: {max_speed} dps")
+        print(f"  Update interval: {dt*1000:.0f}ms ({steps_per_period} steps/period)")
+        print(f"  Press Ctrl+C to stop")
+        print(f"====================================\n")
+
+        # Clear buffer
+        if self.ser and self.ser.is_open:
+            self.ser.reset_input_buffer()
+
+        start_time = time.time()
+        last_response = ""
+        cmd_count = 0
+
+        try:
+            while time.time() - start_time < duration:
+                t = time.time() - start_time
+
+                # Calculate target angle: center + amplitude * sin(2*pi*t/period)
+                angle = center + amplitude * math.sin(2 * math.pi * t / period)
+
+                # Send command using P<motor>:<angle>:<speed> format
+                cmd = f"P{motor_id}:{angle:.2f}:{max_speed}"
+                if self.ser and self.ser.is_open:
+                    self.ser.write((cmd + '\n').encode('utf-8'))
+                    cmd_count += 1
+
+                    # Read response to check motor status (non-blocking)
+                    time.sleep(0.05)  # Wait 50ms for response
+                    if self.ser.in_waiting > 0:
+                        try:
+                            response = self.ser.readline().decode('utf-8', errors='ignore').strip()
+                            if response and 'S=' in response:
+                                # Extract speed from response for monitoring
+                                last_response = response
+                        except:
+                            pass
+                        # Clear remaining buffer
+                        self.ser.reset_input_buffer()
+
+                # Print progress with motor feedback
+                elapsed = time.time() - start_time
+                if last_response:
+                    # Try to extract speed value for monitoring
+                    speed_str = ""
+                    if 'S=' in last_response:
+                        try:
+                            s_idx = last_response.index('S=')
+                            end_idx = last_response.find('dps', s_idx)
+                            if end_idx > s_idx:
+                                speed_str = last_response[s_idx:end_idx+3]
+                        except:
+                            pass
+                    print(f"\r  t={elapsed:.1f}s  target={angle:+7.2f}°  {speed_str}       ", end='', flush=True)
+                else:
+                    print(f"\r  t={elapsed:.1f}s  target={angle:+7.2f}°", end='', flush=True)
+
+                # Sleep for remaining time (accounting for response read delay)
+                remaining_dt = dt - 0.05
+                if remaining_dt > 0:
+                    time.sleep(remaining_dt)
+
+        except KeyboardInterrupt:
+            print("\n\nMotion interrupted by user")
+
+        print(f"\n\nMotion complete ({cmd_count} commands sent). Stopping motor...")
+        self.stop_all()
+        return True
+
     def start_monitor(self):
         """Start background thread to monitor motor status"""
         self.running = True
@@ -242,12 +376,25 @@ class MotorController:
 def interactive_mode(controller):
     """Interactive command line interface"""
     print("\n=== Motor Control ===")
-    print("  M1:<angle>  - Move Motor 1")
+    print("--- Multi-Turn Position (0xA4, recommended) ---")
+    print("  P1:<angle>         - Motor 1 to absolute angle (e.g., P1:30, P1:-45)")
+    print("  P2:<angle>         - Motor 2 to absolute angle")
+    print("  P1:<angle>:<speed> - With speed limit (e.g., P1:30:500)")
+    print("                       Supports ±359999.99°, default 700 dps")
+    print("")
+    print("  PSIN <motor> [amp] [period] [center] [duration] [speed]")
+    print("              - Sin wave with multi-turn (supports negative angles)")
+    print("              - default: amp=30, period=2s, center=0, duration=10s, speed=700")
+    print("              - Example: PSIN 1 30 2 0 10 → oscillate between -30° and 30°")
+    print("")
+    print("--- Single-Turn Position (0xA6, legacy) ---")
+    print("  M1:<angle>  - Move Motor 1 (0~359.99°)")
     print("  M2:<angle>  - Move Motor 2")
-    print("  STOP        - Stop all motors")
     print("  SIN <motor> [amp] [period] [center] [duration]")
-    print("              - Sin wave motion (default: amp=45, period=2s, center=90, duration=10s)")
-    print("              - Range: [center-amp, center+amp], e.g. SIN 1 45 2 90 → [45°~135°]")
+    print("              - Sin wave (legacy, positive angles only)")
+    print("")
+    print("--- Other Commands ---")
+    print("  STOP        - Stop all motors")
     print("  q           - Exit")
     print("=====================\n")
 
@@ -269,13 +416,37 @@ def interactive_mode(controller):
             if cmd.lower() in ['q', 'quit', 'exit']:
                 break
 
-            # Parse SIN command
+            # Parse PSIN command (multi-turn sin wave, supports negative angles)
+            if cmd.upper().startswith('PSIN'):
+                parts = cmd.split()
+                if len(parts) < 2:
+                    print("Usage: PSIN <motor> [amplitude] [period] [center] [duration] [speed]")
+                    print("Example: PSIN 1 30 2 0 10      → oscillate between -30° and 30°")
+                    print("Example: PSIN 1 40 1.5 10 15  → oscillate between -30° and 50°")
+                    print("Example: PSIN 1 30 2 0 10 500 → with max speed 500 dps")
+                    continue
+
+                try:
+                    motor_id = int(parts[1])
+                    amplitude = float(parts[2]) if len(parts) > 2 else 30.0
+                    period = float(parts[3]) if len(parts) > 3 else 2.0
+                    center = float(parts[4]) if len(parts) > 4 else 0.0
+                    duration = float(parts[5]) if len(parts) > 5 else 10.0
+                    max_speed = int(parts[6]) if len(parts) > 6 else 700
+
+                    controller.sin_motion_multi_turn(motor_id, amplitude, period, center, duration, max_speed)
+                except ValueError as e:
+                    print(f"Invalid parameter: {e}")
+                continue
+
+            # Parse SIN command (legacy, single-turn)
             if cmd.upper().startswith('SIN'):
                 parts = cmd.split()
                 if len(parts) < 2:
                     print("Usage: SIN <motor> [amplitude] [period] [center] [duration]")
                     print("Example: SIN 1 45 2 90 10  → oscillate between 45° and 135°")
                     print("Example: SIN 1 30 1.5 180 20  → oscillate between 150° and 210°")
+                    print("Note: Use PSIN for multi-turn with negative angle support")
                     continue
 
                 try:

@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QRadioButton, QComboBox,
     QTextEdit, QGroupBox, QMessageBox, QButtonGroup, QCheckBox,
-    QSplitter, QScrollArea, QSpinBox
+    QSplitter, QScrollArea, QSpinBox, QTabWidget
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 
@@ -954,8 +954,8 @@ class WiFiConfigDialog(QWidget):
 class ExoPulseGUI(QMainWindow):
     """Main ExoPulse controller with integrated motor monitoring"""
 
-    HIST_LEN = 300  # Data history length (30s at 10Hz)
-    PLOT_HZ = 10    # Plot update frequency
+    HIST_LEN = 6000  # Data history length (60s at 100Hz for TCP data)
+    PLOT_HZ = 10     # Plot update frequency
 
     def __init__(self):
         super().__init__()
@@ -1000,6 +1000,15 @@ class ExoPulseGUI(QMainWindow):
                 'acceleration': deque(maxlen=self.HIST_LEN),
                 'angle': deque(maxlen=self.HIST_LEN),
             }
+        }
+
+        # TCP data buffers (for exo data from experiment_menu via TCP)
+        self.tcp_data = {
+            'time': deque(maxlen=self.HIST_LEN),
+            'left_angle': deque(maxlen=self.HIST_LEN),   # Left hip angle (deg)
+            'right_angle': deque(maxlen=self.HIST_LEN),  # Right hip angle (deg)
+            'left_torque': deque(maxlen=self.HIST_LEN),  # Left hip torque (Nm)
+            'right_torque': deque(maxlen=self.HIST_LEN), # Right hip torque (Nm)
         }
 
         self.motor_status = {
@@ -1088,6 +1097,132 @@ class ExoPulseGUI(QMainWindow):
         self.ping_timer = QTimer()
         self.ping_timer.timeout.connect(self._send_ping)
 
+        # Auto-start TCP receiver for exo data from experiment_menu
+        # Delayed start to allow window to initialize
+        QTimer.singleShot(1000, self._auto_start_exo_receiver)
+
+    def _auto_start_exo_receiver(self):
+        """Auto-start TCP receiver for exo data (runs without demo mode)"""
+        print("[motor_control] 🚀 Auto-starting exo data receiver...", flush=True)
+
+        # Use same mechanism as demo mode but without other demo features
+        self.demo_stop_event = threading.Event()
+        self.demo_stop_event.clear()
+        self.demo_connected = False
+        self.last_exo_data_time = 0.0
+
+        # Start receiver thread
+        self._exo_receiver_thread = threading.Thread(
+            target=self._exo_data_receiver_loop,
+            daemon=True
+        )
+        self._exo_receiver_thread.start()
+
+        # Start status timer
+        if not self.exo_status_timer:
+            self.exo_status_timer = QTimer()
+            self.exo_status_timer.timeout.connect(self._check_exo_data_status)
+        self.exo_status_timer.start(500)
+
+        print("[motor_control] ✓ Exo receiver thread started", flush=True)
+
+    def _exo_data_receiver_loop(self):
+        """TCP receiver loop for exo data (auto-reconnect)"""
+        import socket
+        import json
+
+        EXO_HOST = "127.0.0.1"
+        EXO_PORT = 9998
+        buffer = ""
+        packet_count = 0
+
+        print(f"[motor_control] 📡 Connecting to exo broadcaster {EXO_HOST}:{EXO_PORT}...", flush=True)
+
+        while not self.demo_stop_event.is_set():
+            # Connect if needed
+            if self.demo_tcp_sock is None:
+                try:
+                    self.demo_tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    self.demo_tcp_sock.settimeout(2.0)
+                    self.demo_tcp_sock.connect((EXO_HOST, EXO_PORT))
+                    self.demo_tcp_sock.settimeout(0.5)
+                    self.demo_connected = True
+                    print(f"[motor_control] ✓ Connected to exo broadcaster", flush=True)
+                except (socket.timeout, ConnectionRefusedError, OSError) as e:
+                    self.demo_tcp_sock = None
+                    self.demo_connected = False
+                    # Retry silently every 2 seconds
+                    time.sleep(2)
+                    continue
+
+            # Receive data
+            try:
+                data = self.demo_tcp_sock.recv(4096)
+                if not data:
+                    print("[motor_control] ⚠ Exo broadcaster closed connection", flush=True)
+                    self.demo_tcp_sock.close()
+                    self.demo_tcp_sock = None
+                    self.demo_connected = False
+                    continue
+
+                buffer += data.decode('utf-8', errors='ignore')
+
+                # Process complete lines
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    if line.strip():
+                        try:
+                            exo_data = json.loads(line)
+                            self.latest_exo_data = exo_data
+                            self.last_exo_data_time = time.time()
+                            packet_count += 1
+
+                            # Extract and convert
+                            import math
+                            la_deg = math.degrees(exo_data.get('la', 0))
+                            ra_deg = math.degrees(exo_data.get('ra', 0))
+                            lt = exo_data.get('lt')
+                            rt = exo_data.get('rt')
+
+                            # Debug: log every 100 packets
+                            if packet_count == 1 or packet_count % 100 == 0:
+                                status = "✓" if (la_deg != 0 or ra_deg != 0) else "⚠️ ZERO"
+                                lt_str = f"{lt:.2f}" if lt is not None else "N/A"
+                                rt_str = f"{rt:.2f}" if rt is not None else "N/A"
+                                print(f"[motor_control] {status} #{packet_count} L:{la_deg:7.2f}° R:{ra_deg:7.2f}° | T L:{lt_str}Nm R:{rt_str}Nm", flush=True)
+
+                            # Update tcp_data for TCP plots
+                            elapsed = time.time() - self.start_time
+
+                            self.tcp_data['time'].append(elapsed)
+                            self.tcp_data['left_angle'].append(la_deg)
+                            self.tcp_data['right_angle'].append(ra_deg)
+                            self.tcp_data['left_torque'].append(lt if lt is not None else 0)
+                            self.tcp_data['right_torque'].append(rt if rt is not None else 0)
+
+                        except json.JSONDecodeError:
+                            pass
+
+            except socket.timeout:
+                continue
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                print("[motor_control] ⚠ Exo connection reset", flush=True)
+                if self.demo_tcp_sock:
+                    try:
+                        self.demo_tcp_sock.close()
+                    except:
+                        pass
+                self.demo_tcp_sock = None
+                self.demo_connected = False
+
+        # Cleanup
+        if self.demo_tcp_sock:
+            try:
+                self.demo_tcp_sock.close()
+            except:
+                pass
+            self.demo_tcp_sock = None
+
     def setup_ui(self):
         """Build the user interface with sidebar"""
         central_widget = QWidget()
@@ -1115,7 +1250,7 @@ class ExoPulseGUI(QMainWindow):
         right_layout.addWidget(self.log_label)
         right_layout.addWidget(self.log_text)
 
-        # Plot area (placeholder)
+        # Plot area (scrollable for all plots: CAN + TCP)
         self.plot_widget = QWidget()
         self.plot_layout = QVBoxLayout(self.plot_widget)
         right_layout.addWidget(self.plot_widget)
@@ -1474,10 +1609,13 @@ class ExoPulseGUI(QMainWindow):
             if widget:
                 widget.setParent(None)
 
-        # Count visible plots
+        # Count visible CAN plots
         visible_count = sum(1 for v in self.visible_plots.values() if v)
+        # Add 2 rows for TCP plots (angle + torque)
+        tcp_rows = 2
+        total_rows = visible_count + tcp_rows
 
-        if visible_count == 0:
+        if total_rows == 0:
             label = QLabel("No data selected for display")
             label.setAlignment(Qt.AlignCenter)
             self.plot_layout.addWidget(label)
@@ -1485,22 +1623,23 @@ class ExoPulseGUI(QMainWindow):
 
         # Create new figure
         plt.style.use('dark_background')
-        self.fig = plt.Figure(figsize=(12, 2.5 * visible_count), dpi=100)
+        self.fig = plt.Figure(figsize=(12, 2.2 * total_rows), dpi=100)
         self.canvas = FigureCanvas(self.fig)
 
         # Create grid
-        gs = gridspec.GridSpec(visible_count, 2, hspace=0.4, wspace=0.3, top=0.95, bottom=0.08)
+        gs = gridspec.GridSpec(total_rows, 2, hspace=0.4, wspace=0.3, top=0.96, bottom=0.05)
 
         self.axes = {}
         self.lines = {}
         row = 0
 
+        # CAN motor plots
         plot_configs = [
             ('temp', 'Temperature', '°C', 'cyan', 'orange'),
             ('current', 'Current', 'A', 'cyan', 'orange'),
             ('speed', 'Speed', 'rad/s', 'cyan', 'orange'),
             ('acceleration', 'Acceleration', 'dps²', 'cyan', 'orange'),
-            ('angle', 'Angle', '0.01°', 'cyan', 'orange'),
+            ('angle', 'Angle', '°', 'cyan', 'orange'),
         ]
 
         for key, title, ylabel, color1, color2 in plot_configs:
@@ -1511,7 +1650,7 @@ class ExoPulseGUI(QMainWindow):
             ax1 = self.fig.add_subplot(gs[row, 0])
             ax1.set_title(f'Motor 1 - {title}', color=color1, fontweight='bold')
             ax1.set_ylabel(ylabel, color=color1)
-            ax1.set_autoscale_on(True)  # Enable autoscale
+            ax1.set_autoscale_on(True)
             ax1.grid(True, alpha=0.3)
             line1, = ax1.plot([], [], color=color1, lw=2)
 
@@ -1522,7 +1661,7 @@ class ExoPulseGUI(QMainWindow):
             ax2 = self.fig.add_subplot(gs[row, 1])
             ax2.set_title(f'Motor 2 - {title}', color=color2, fontweight='bold')
             ax2.set_ylabel(ylabel, color=color2)
-            ax2.set_autoscale_on(True)  # Enable autoscale
+            ax2.set_autoscale_on(True)
             ax2.grid(True, alpha=0.3)
             line2, = ax2.plot([], [], color=color2, lw=2)
 
@@ -1531,8 +1670,47 @@ class ExoPulseGUI(QMainWindow):
 
             row += 1
 
+        # TCP Angle plots (from experiment_menu)
+        ax_tcp_la = self.fig.add_subplot(gs[row, 0])
+        ax_tcp_la.set_title('Left Hip Angle (from TCP)', color='#3498DB', fontweight='bold')
+        ax_tcp_la.set_ylabel('Angle (°)', color='#3498DB')
+        ax_tcp_la.grid(True, alpha=0.3)
+        ax_tcp_la.set_facecolor('#16213e')
+        line_tcp_la, = ax_tcp_la.plot([], [], color='#3498DB', lw=2)
+        self.axes['tcp_left_angle'] = ax_tcp_la
+        self.lines['tcp_left_angle'] = line_tcp_la
+
+        ax_tcp_ra = self.fig.add_subplot(gs[row, 1])
+        ax_tcp_ra.set_title('Right Hip Angle (from TCP)', color='#E74C3C', fontweight='bold')
+        ax_tcp_ra.set_ylabel('Angle (°)', color='#E74C3C')
+        ax_tcp_ra.grid(True, alpha=0.3)
+        ax_tcp_ra.set_facecolor('#16213e')
+        line_tcp_ra, = ax_tcp_ra.plot([], [], color='#E74C3C', lw=2)
+        self.axes['tcp_right_angle'] = ax_tcp_ra
+        self.lines['tcp_right_angle'] = line_tcp_ra
+        row += 1
+
+        # TCP Torque plots (from experiment_menu)
+        ax_tcp_lt = self.fig.add_subplot(gs[row, 0])
+        ax_tcp_lt.set_title('Left Hip Torque (from TCP)', color='#2ECC71', fontweight='bold')
+        ax_tcp_lt.set_ylabel('Torque (Nm)', color='#2ECC71')
+        ax_tcp_lt.grid(True, alpha=0.3)
+        ax_tcp_lt.set_facecolor('#16213e')
+        line_tcp_lt, = ax_tcp_lt.plot([], [], color='#2ECC71', lw=2)
+        self.axes['tcp_left_torque'] = ax_tcp_lt
+        self.lines['tcp_left_torque'] = line_tcp_lt
+
+        ax_tcp_rt = self.fig.add_subplot(gs[row, 1])
+        ax_tcp_rt.set_title('Right Hip Torque (from TCP)', color='#F39C12', fontweight='bold')
+        ax_tcp_rt.set_ylabel('Torque (Nm)', color='#F39C12')
+        ax_tcp_rt.grid(True, alpha=0.3)
+        ax_tcp_rt.set_facecolor('#16213e')
+        line_tcp_rt, = ax_tcp_rt.plot([], [], color='#F39C12', lw=2)
+        self.axes['tcp_right_torque'] = ax_tcp_rt
+        self.lines['tcp_right_torque'] = line_tcp_rt
+
         # Status text
-        self.status_text = self.fig.text(0.5, 0.02, '', ha='center', fontsize=8, family='monospace', color='lime')
+        self.status_text = self.fig.text(0.5, 0.01, '', ha='center', fontsize=8, family='monospace', color='lime')
 
         self.plot_layout.addWidget(self.canvas)
 
@@ -1594,6 +1772,35 @@ class ExoPulseGUI(QMainWindow):
                             center = (val_min + val_max) / 2
                             offset = 1 if key == 'acceleration' else 0.1
                             ax.set_ylim(center - offset, center + offset)
+
+        # Update TCP plots (angle and torque from experiment_menu)
+        tcp = self.tcp_data
+        if len(tcp['time']) >= 2:
+            t = list(tcp['time'])
+
+            # TCP Angle plots
+            for key, data_key in [('tcp_left_angle', 'left_angle'), ('tcp_right_angle', 'right_angle')]:
+                if key in self.lines:
+                    values = list(tcp[data_key])
+                    self.lines[key].set_data(t, values)
+                    ax = self.axes[key]
+                    ax.set_xlim(max(0, t[-1] - window_size), t[-1] + 1)
+                    if values:
+                        v_min, v_max = min(values), max(values)
+                        margin = (v_max - v_min) * 0.15 + 1
+                        ax.set_ylim(v_min - margin, v_max + margin)
+
+            # TCP Torque plots
+            for key, data_key in [('tcp_left_torque', 'left_torque'), ('tcp_right_torque', 'right_torque')]:
+                if key in self.lines:
+                    values = list(tcp[data_key])
+                    self.lines[key].set_data(t, values)
+                    ax = self.axes[key]
+                    ax.set_xlim(max(0, t[-1] - window_size), t[-1] + 1)
+                    if values:
+                        v_min, v_max = min(values), max(values)
+                        margin = (v_max - v_min) * 0.15 + 0.5
+                        ax.set_ylim(v_min - margin, v_max + margin)
 
         # Update status text
         self.frame_count += 1

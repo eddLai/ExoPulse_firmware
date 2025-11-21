@@ -147,9 +147,17 @@ void printDetailedStatus(const MotorStatus& status, int64_t offset) {
 // Print help message
 void printHelp() {
     Serial.println("\n=== Available Commands ===");
-    Serial.println("--- Motor Position Control (0xA6) ---");
+    Serial.println("--- Multi-Turn Position Control (0xA4) ---");
+    Serial.println("P1:<angle>            - Move Motor 1 to absolute angle (e.g., P1:30, P1:-45.5)");
+    Serial.println("P2:<angle>            - Move Motor 2 to absolute angle (e.g., P2:90)");
+    Serial.println("P1:<angle>:<speed>    - Move with speed limit (e.g., P1:30:500)");
+    Serial.println("                        Supports ±359999.99°, default speed=700 dps");
+    Serial.println("");
+    Serial.println("--- Single-Turn Position Control (0xA6) ---");
     Serial.println("M1:<angle>            - Move Motor 1 to angle (e.g., M1:90, M1:-45)");
     Serial.println("M2:<angle>            - Move Motor 2 to angle (e.g., M2:180)");
+    Serial.println("                        Range: 0~359.99°");
+    Serial.println("");
     Serial.println("STOP                  - Stop all motors (0x80)");
     Serial.println("");
     Serial.println("--- Motor Torque Control (0xA1) ---");
@@ -512,6 +520,52 @@ void processSerialCommand(const String& cmd) {
             Serial.println(response.encoder);
         } else {
             Serial.println("[ERROR] Torque command failed");
+        }
+    }
+    // ============================================================================
+    // Multi-Turn Position Control Commands (0xA4): P1:<angle> or P1:<angle>:<speed>
+    // ============================================================================
+    else if (cmd.startsWith("P1:") || cmd.startsWith("P2:")) {
+        uint8_t motorID = (cmd.charAt(1) == '1') ? MOTOR_ID_1 : MOTOR_ID_2;
+        uint32_t canID = (motorID == MOTOR_ID_1) ? CAN_ID_1 : CAN_ID_2;
+
+        // Parse angle and optional speed: P1:30 or P1:30:500
+        String params = cmd.substring(3);
+        int colonIdx = params.indexOf(':');
+
+        float angle = 0.0f;
+        uint16_t maxSpeed = DEFAULT_MULTI_TURN_MAX_SPEED;
+
+        if (colonIdx > 0) {
+            // Format: P1:<angle>:<speed>
+            angle = params.substring(0, colonIdx).toFloat();
+            maxSpeed = (uint16_t)params.substring(colonIdx + 1).toInt();
+        } else {
+            // Format: P1:<angle>
+            angle = params.toFloat();
+        }
+
+        Serial.print("[CMD] Motor ");
+        Serial.print(motorID);
+        Serial.print(" multi-turn -> ");
+        Serial.print(angle, 2);
+        Serial.print(" deg, max speed: ");
+        Serial.print(maxSpeed);
+        Serial.println(" dps");
+
+        ControlResponse response;
+        if (moveToMultiTurnAngle(canID, angle, maxSpeed, &response)) {
+            Serial.println("[OK] Multi-turn position command sent");
+            Serial.print("  Response: T=");
+            Serial.print(response.temperature);
+            Serial.print("C, I=");
+            Serial.print(response.torqueCurrent);
+            Serial.print(", S=");
+            Serial.print(response.speed);
+            Serial.print("dps, E=");
+            Serial.println(response.encoder);
+        } else {
+            Serial.println("[ERROR] Multi-turn position command failed");
         }
     }
 }

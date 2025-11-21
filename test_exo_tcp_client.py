@@ -70,7 +70,9 @@ def main():
                                 lt_str = f"{lt:.2f}" if lt is not None else "N/A"
                                 rt_str = f"{rt:.2f}" if rt is not None else "N/A"
 
-                                print(f"[{msg_count:6d}] L:{la_deg:7.2f}° R:{ra_deg:7.2f}° | "
+                                # Check if values are non-zero
+                                status = "✓" if (la != 0 or ra != 0) else "⚠️ ZERO"
+                                print(f"[{msg_count:6d}] {status} L:{la_deg:7.2f}° R:{ra_deg:7.2f}° | "
                                       f"Torque L:{lt_str:>6}Nm R:{rt_str:>6}Nm | ts:{ts:.3f}")
 
                         except json.JSONDecodeError as e:
