@@ -2,6 +2,7 @@
 #include "motor_protocol.h"
 #include "calibration.h"
 #include "config.h"
+#include "output_mode.h"  // Shared output mode definitions
 #include "wifi_pairing.h"
 #include <Arduino.h>
 
@@ -10,16 +11,6 @@
  * Handles all serial communication with the user
  * Supports multiple output modes: Serial, WiFi, or Both
  */
-
-// Output mode enumeration
-enum OutputMode {
-    MODE_SERIAL,  // Output to Serial only (default)
-    MODE_WIFI,    // Output to WiFi TCP client only
-    MODE_BOTH     // Output to both Serial and WiFi (debug mode)
-};
-
-// External reference to current output mode (defined in main.cpp)
-extern volatile OutputMode currentOutputMode;
 
 // External reference to packet sequence counter (defined in main.cpp)
 extern uint32_t packetSequence;

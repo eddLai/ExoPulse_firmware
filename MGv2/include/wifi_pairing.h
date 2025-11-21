@@ -1,11 +1,15 @@
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
+#include "output_mode.h"
 
 /*
  * WiFi Pairing Module
  * Handles WiFi STA connection and TCP server for motor data transmission
  */
+
+// Forward declaration of command processor (defined in serial_commands.h)
+void processSerialCommand(const String& cmd);
 
 namespace WiFiPairing {
 
@@ -249,9 +253,15 @@ void printWiFiStatus() {
 /**
  * Send periodic WiFi status updates to client
  * Called periodically from WiFi management task
+ * NOTE: Only sends status when NOT in MODE_WIFI to avoid interfering with motor data
  */
 void sendWiFiStatus() {
     if (!client || !client.connected() || !wifiConnected) {
+        return;
+    }
+
+    // Don't send status updates when in WiFi output mode (motor data has priority)
+    if (currentOutputMode == MODE_WIFI || currentOutputMode == MODE_BOTH) {
         return;
     }
 
@@ -335,6 +345,12 @@ void handlePingPong() {
 
                 client.print(pongMsg);
             }
+        }
+        // Handle other commands (MODE_WIFI, MODE_SERIAL, WIFI_STATUS, etc.)
+        else if (line.length() > 0) {
+            // Forward the command to serial command processor
+            // This allows TCP clients to send commands just like via Serial
+            processSerialCommand(line);
         }
     }
 }
