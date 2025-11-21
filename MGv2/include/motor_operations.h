@@ -103,6 +103,16 @@ bool readMotorAngle(uint32_t canID, MotorStatus& status) {
         return false;
     }
 
+    // DEBUG: Print raw bytes
+    Serial.print("[DEBUG 0x92] RX: ");
+    for (int i = 0; i < 8; i++) {
+        Serial.print("0x");
+        if (rxData[i] < 16) Serial.print("0");
+        Serial.print(rxData[i], HEX);
+        Serial.print(" ");
+    }
+    Serial.println();
+
     // Multi-turn angle is int64_t in rxData[1-7] (7 bytes), unit: 0.01°/LSB
     // Positive = clockwise accumulated, Negative = counter-clockwise accumulated
     int64_t motorAngle = 0;
@@ -112,6 +122,10 @@ bool readMotorAngle(uint32_t canID, MotorStatus& status) {
     if (rxData[7] & 0x80) {
         motorAngle |= 0xFF00000000000000LL;  // Set upper byte for sign extension
     }
+
+    Serial.print("[DEBUG] Raw int64: ");
+    Serial.print((int32_t)(motorAngle & 0xFFFFFFFF));
+    Serial.println();
 
     status.motorAngle = motorAngle;
 

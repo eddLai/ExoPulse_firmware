@@ -248,47 +248,19 @@ class ExoPulseUnifiedGUI(QMainWindow):
     def _init_ui(self):
         """Initialize the user interface"""
 
-        # Main widget and layout
+        # Main widget and layout - directly embed motor control without sidebar
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
-        main_layout = QHBoxLayout(main_widget)
+        main_layout = QVBoxLayout(main_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Create splitter
-        splitter = QSplitter(Qt.Horizontal)
-
-        # === LEFT SIDEBAR ===
-        sidebar = self._create_sidebar()
-        splitter.addWidget(sidebar)
-
-        # === RIGHT CONTENT AREA ===
-        # First page: Motor Control (embedded)
+        # Directly add motor control widget
         self.motor_control = MotorControlWidget()
-        self.content_stack.addWidget(self.motor_control)
-
-        # Additional pages: Component launchers
-        for comp in self.components[1:]:  # Skip motor_control (already added)
-            comp_id, display_name, description, script_name = comp[:4]
-            script_path = self.ui_dir / script_name
-            launcher = ComponentLauncher(comp_id, display_name, description, script_path)
-            self.content_stack.addWidget(launcher)
-
-        splitter.addWidget(self.content_stack)
-
-        # Set splitter sizes (sidebar: 250px, content: rest)
-        splitter.setSizes([250, 1150])
-        splitter.setCollapsible(0, False)
-
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(self.motor_control)
 
         # Apply theme
         self._apply_theme()
-
-        # Select first component (motor control) by default
-        if self.sidebar_buttons:
-            self.sidebar_buttons[0].setChecked(True)
-            self.content_stack.setCurrentIndex(0)
 
     def _create_sidebar(self):
         """Create the sidebar with navigation buttons"""
@@ -410,36 +382,8 @@ class ExoPulseUnifiedGUI(QMainWindow):
         return sidebar_widget
 
     def _connect_motor_control_signals(self):
-        """Connect signals from motor control to update sidebar"""
-        # Connect motor type change signal
-        self.motor_control.radio_can.toggled.connect(self._on_motor_type_changed)
-        # Note: Communication mode is now managed via status bar in motor_control.py
-
-    def _on_motor_type_changed(self, checked):
-        """Handle motor type change to enable/disable sidebar buttons"""
-        is_can_mode = checked
-
-        for btn in self.sidebar_buttons:
-            requires_can = btn.property("requires_can")
-            if requires_can:
-                btn.setEnabled(is_can_mode)
-
-        # Log the mode change
-        mode_name = "CAN" if is_can_mode else "Lower Chip"
-        print(f"Motor mode changed to: {mode_name}")
-        print(f"CAN monitoring tools {'enabled' if is_can_mode else 'disabled'}")
-
-    def _on_sidebar_click(self, index):
-        """Handle sidebar button click"""
-        # Uncheck all buttons
-        for btn in self.sidebar_buttons:
-            btn.setChecked(False)
-
-        # Check clicked button
-        self.sidebar_buttons[index].setChecked(True)
-
-        # Switch content
-        self.content_stack.setCurrentIndex(index)
+        """Connect signals from motor control (no longer needed without sidebar)"""
+        pass
 
     def _apply_theme(self):
         """Apply application theme"""

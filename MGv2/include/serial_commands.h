@@ -152,6 +152,10 @@ void printHelp() {
     Serial.println("M2:<angle>            - Move Motor 2 to angle (e.g., M2:180)");
     Serial.println("STOP                  - Stop all motors (0x80)");
     Serial.println("");
+    Serial.println("--- Motor Torque Control (0xA1) ---");
+    Serial.println("T1:<iq>               - Set Motor 1 torque (-800~800, e.g., T1:500)");
+    Serial.println("T2:<iq>               - Set Motor 2 torque (-800~800, e.g., T2:-300)");
+    Serial.println("");
     Serial.println("--- ROM Calibration (0x19, writes to motor ROM) ---");
     Serial.println("CAL_M1 or CAL1        - Calibrate Motor 1 (write zero to ROM)");
     Serial.println("CAL_M2 or CAL2        - Calibrate Motor 2 (write zero to ROM)");
@@ -329,30 +333,30 @@ void processSerialCommand(const String& cmd) {
     else if (cmd == "HELP") {
         printHelp();
     }
-    // Read Single-Turn Angle Commands (0x94)
+    // Read Multi-Turn Angle Commands (0x92)
     else if (cmd == "READ_SINGLE_M1" || cmd == "SINGLE1") {
-        Serial.println("[CMD] Reading Motor 1 single-turn angle (0x94)...");
+        Serial.println("[CMD] Reading Motor 1 multi-turn angle (0x92)...");
         MotorStatus status;
         if (readMotorAngle(CAN_ID_1, status)) {
-            float singleDeg = (float)status.motorAngle * 0.01f;
-            Serial.print("[OK] Motor 1 single-turn angle: ");
-            Serial.print(singleDeg, 2);
+            float angleDeg = (float)status.motorAngle * 0.01f;
+            Serial.print("[OK] Motor 1 angle: ");
+            Serial.print(angleDeg, 2);
             Serial.print("° (raw: ");
-            Serial.print((uint32_t)status.motorAngle);
+            Serial.print((int32_t)(status.motorAngle & 0xFFFFFFFF));  // Show lower 32 bits as signed
             Serial.println(")");
         } else {
             Serial.println("[ERROR] Failed to read Motor 1 angle");
         }
     }
     else if (cmd == "READ_SINGLE_M2" || cmd == "SINGLE2") {
-        Serial.println("[CMD] Reading Motor 2 single-turn angle (0x94)...");
+        Serial.println("[CMD] Reading Motor 2 multi-turn angle (0x92)...");
         MotorStatus status;
         if (readMotorAngle(CAN_ID_2, status)) {
-            float singleDeg = (float)status.motorAngle * 0.01f;
-            Serial.print("[OK] Motor 2 single-turn angle: ");
-            Serial.print(singleDeg, 2);
+            float angleDeg = (float)status.motorAngle * 0.01f;
+            Serial.print("[OK] Motor 2 angle: ");
+            Serial.print(angleDeg, 2);
             Serial.print("° (raw: ");
-            Serial.print((uint32_t)status.motorAngle);
+            Serial.print((int32_t)(status.motorAngle & 0xFFFFFFFF));  // Show lower 32 bits as signed
             Serial.println(")");
         } else {
             Serial.println("[ERROR] Failed to read Motor 2 angle");
@@ -478,6 +482,36 @@ void processSerialCommand(const String& cmd) {
             Serial.println(response.encoder);
         } else {
             Serial.println("[ERROR] Position command failed");
+        }
+    }
+    // Torque Control Commands (T1:xxx, T2:xxx)
+    else if (cmd.startsWith("T1:") || cmd.startsWith("T2:")) {
+        int motorID = cmd.charAt(1) - '0';  // 1 or 2
+        int16_t iqValue = cmd.substring(3).toInt();
+        uint32_t canID = (motorID == 1) ? CAN_ID_1 : CAN_ID_2;
+
+        // Clamp iqValue to safety limit (±800)
+        if (iqValue > 800) iqValue = 800;
+        if (iqValue < -800) iqValue = -800;
+
+        Serial.print("[CMD] Motor ");
+        Serial.print(motorID);
+        Serial.print(" torque -> iq=");
+        Serial.println(iqValue);
+
+        ControlResponse response;
+        if (sendTorqueControl_A1(canID, iqValue, &response)) {
+            Serial.println("[OK] Torque command sent");
+            Serial.print("  Response: T=");
+            Serial.print(response.temperature);
+            Serial.print("C, I=");
+            Serial.print(response.torqueCurrent);
+            Serial.print(", S=");
+            Serial.print(response.speed);
+            Serial.print("dps, E=");
+            Serial.println(response.encoder);
+        } else {
+            Serial.println("[ERROR] Torque command failed");
         }
     }
 }

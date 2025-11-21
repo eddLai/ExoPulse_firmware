@@ -22,6 +22,7 @@ import time
 import sys
 import re
 import subprocess
+import json
 from datetime import datetime
 from collections import deque
 from pathlib import Path
@@ -969,6 +970,13 @@ class ExoPulseGUI(QMainWindow):
         self.demo_thread = None
         self.demo_stop_event = threading.Event()
 
+        # Demo TCP client for receiving exo data from experiment_menu
+        self.demo_tcp_sock = None
+        self.demo_connected = False
+        self.last_exo_data_time = 0.0
+        self.exo_status_timer = None
+        self.latest_exo_data = None  # Store latest received exo data
+
         # Threading control
         self.stop_udp_evt = threading.Event()
         self.stop_uart_evt = threading.Event()
@@ -1210,36 +1218,37 @@ class ExoPulseGUI(QMainWindow):
         control_group = QGroupBox("Motor Control")
         control_layout = QVBoxLayout()
 
-        # Angle inputs
+        # Torque inputs (amplitude in degrees for sin wave)
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Angle A:"))
-        self.entry_a = QLineEdit("-30")
+        row1.addWidget(QLabel("Torque M1:"))
+        self.entry_a = QLineEdit("30")
         self.entry_a.setFixedWidth(50)
         row1.addWidget(self.entry_a)
-        row1.addWidget(QLabel("B:"))
+        row1.addWidget(QLabel("M2:"))
         self.entry_b = QLineEdit("30")
         self.entry_b.setFixedWidth(50)
         row1.addWidget(self.entry_b)
+        row1.addWidget(QLabel("(amplitude °)"))
         control_layout.addLayout(row1)
 
-        # Speed
+        # Duration
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Speed (deg/s):"))
-        self.entry_speed = QLineEdit("25")
+        row2.addWidget(QLabel("Duration (s):"))
+        self.entry_speed = QLineEdit("10")
         self.entry_speed.setFixedWidth(60)
         row2.addWidget(self.entry_speed)
         row2.addStretch()
         control_layout.addLayout(row2)
 
-        # Foot selection
+        # Motor selection
         row3 = QHBoxLayout()
-        row3.addWidget(QLabel("Foot:"))
+        row3.addWidget(QLabel("Motor:"))
         self.foot_group = QButtonGroup()
-        self.radio_left = QRadioButton("L")
-        self.radio_right = QRadioButton("R")
+        self.radio_left = QRadioButton("M2")
+        self.radio_right = QRadioButton("M1")
         self.radio_both = QRadioButton("Both")
         self.radio_both.setChecked(True)
-        for radio in [self.radio_left, self.radio_right, self.radio_both]:
+        for radio in [self.radio_right, self.radio_left, self.radio_both]:
             self.foot_group.addButton(radio)
             row3.addWidget(radio)
         row3.addStretch()
@@ -1397,10 +1406,6 @@ class ExoPulseGUI(QMainWindow):
         btn_swing.clicked.connect(self._start_swing_thread)
         action_layout.addWidget(btn_swing)
 
-        btn_led = QPushButton("Toggle LED")
-        btn_led.clicked.connect(self._toggle_led)
-        action_layout.addWidget(btn_led)
-
         self.btn_demo = QPushButton("Start Demo")
         self.btn_demo.clicked.connect(self._toggle_demo_mode)
         action_layout.addWidget(self.btn_demo)
@@ -1495,7 +1500,7 @@ class ExoPulseGUI(QMainWindow):
             ('current', 'Current', 'A', 'cyan', 'orange'),
             ('speed', 'Speed', 'rad/s', 'cyan', 'orange'),
             ('acceleration', 'Acceleration', 'dps²', 'cyan', 'orange'),
-            ('angle', 'Angle', '°', 'cyan', 'orange'),
+            ('angle', 'Angle', '0.01°', 'cyan', 'orange'),
         ]
 
         for key, title, ylabel, color1, color2 in plot_configs:
@@ -2418,9 +2423,79 @@ class ExoPulseGUI(QMainWindow):
             except Exception as exc:
                 self._log(f"⚠ UART error: {exc}")
 
-    def _toggle_led(self):
-        """Toggle LED"""
-        self._send(make_led_packet(), "LED toggle")
+    def _send_motor_angle_cmd(self, motor_id: int, angle: float, log: bool = True):
+        """
+        Send direct motor angle command using M1/M2 serial protocol.
+
+        Args:
+            motor_id: 1 or 2
+            angle: Target angle in degrees (can be negative)
+            log: Whether to log the command
+        """
+        if motor_id not in [1, 2]:
+            self._log(f"⚠ Invalid motor_id: {motor_id}")
+            return False
+
+        cmd = f"M{motor_id}:{angle:.2f}\n"
+        cmd_bytes = cmd.encode('utf-8')
+
+        mode_str = f"[{self.motor_mode.upper()}]"
+
+        if self.current_mode == "wifi":
+            if not self.tcp_sock:
+                if log:
+                    self._log("⚠ TCP not connected")
+                return False
+            try:
+                self.tcp_sock.sendall(cmd_bytes)
+                if log:
+                    self._log(f"→ {mode_str} [TCP] M{motor_id}:{angle:.2f}°")
+                return True
+            except Exception as exc:
+                if log:
+                    self._log(f"⚠ TCP error: {exc}")
+                return False
+        else:
+            try:
+                with self.serial_lock:
+                    if self.ser and self.ser.is_open:
+                        self.ser.write(cmd_bytes)
+                        self.ser.flush()
+                        if log:
+                            self._log(f"→ {mode_str} [UART] M{motor_id}:{angle:.2f}°")
+                        return True
+                    else:
+                        if log:
+                            self._log("⚠ UART not open")
+                        return False
+            except Exception as exc:
+                if log:
+                    self._log(f"⚠ UART error: {exc}")
+                return False
+
+    def _send_stop_cmd(self):
+        """Send STOP command to stop all motors"""
+        cmd = "STOP\n"
+        cmd_bytes = cmd.encode('utf-8')
+
+        mode_str = f"[{self.motor_mode.upper()}]"
+
+        if self.current_mode == "wifi":
+            if self.tcp_sock:
+                try:
+                    self.tcp_sock.sendall(cmd_bytes)
+                    self._log(f"→ {mode_str} [TCP] STOP")
+                except:
+                    pass
+        else:
+            try:
+                with self.serial_lock:
+                    if self.ser and self.ser.is_open:
+                        self.ser.write(cmd_bytes)
+                        self.ser.flush()
+                        self._log(f"→ {mode_str} [UART] STOP")
+            except:
+                pass
 
     def _send_stop(self):
         """Stop motors"""
@@ -2431,41 +2506,76 @@ class ExoPulseGUI(QMainWindow):
         threading.Thread(target=self._run_swing, daemon=True).start()
 
     def _run_swing(self):
-        """Execute swing"""
-        def deg2centideg(x):
-            return int(round(x * 100))
-
+        """Execute sinusoidal torque control motion via motor_serial_control.py"""
+        # Parse UI inputs
         try:
-            a = float(self.entry_a.text())
-            b = float(self.entry_b.text())
+            amplitude_m1 = float(self.entry_a.text())  # amplitude in degrees
+            amplitude_m2 = float(self.entry_b.text())  # amplitude in degrees
+            duration = float(self.entry_speed.text())  # total duration in seconds
         except ValueError:
-            QMessageBox.warning(self, "Error", "Invalid angles")
+            self._log("⚠ Invalid amplitude or duration value")
             return
 
-        foot = "both"
+        if duration <= 0:
+            self._log("⚠ Duration must be positive")
+            return
+
+        # Determine which motors to control
+        motor_select = "both"
         if self.radio_right.isChecked():
-            foot = "right"
+            motor_select = "m1"
         elif self.radio_left.isChecked():
-            foot = "left"
+            motor_select = "m2"
 
-        def get_angles(pos):
-            if foot == "right":
-                return deg2centideg(pos), 0
-            elif foot == "left":
-                return 0, deg2centideg(pos)
+        self._log(f"=== Sinusoidal Torque Control ===")
+        self._log(f"  Amplitude M1: {amplitude_m1}°")
+        self._log(f"  Amplitude M2: {amplitude_m2}°")
+        self._log(f"  Duration: {duration}s")
+        self._log(f"  Motor: {motor_select.upper()}")
+
+        # Call motor_serial_control.py sin_motion function
+        try:
+            from .motor_serial_control import MotorController
+            
+            # Auto-detect port
+            controller = MotorController()
+            if not controller.connect():
+                self._log("⚠ Failed to connect to ESP32")
+                return
+            
+            # Sin motion parameters
+            period = 2.0  # 2 second period for smooth motion
+            center = 90.0  # Center position at 90°
+            
+            self._log(f"  Period: {period}s")
+            self._log(f"  Center: {center}°")
+            
+            # Execute sin motion based on motor selection
+            if motor_select == "m1":
+                self._log("  Executing M1 only...")
+                controller.sin_motion(1, amplitude_m1, period, center, duration)
+            elif motor_select == "m2":
+                self._log("  Executing M2 only...")
+                controller.sin_motion(2, amplitude_m2, period, center, duration)
             else:
-                return deg2centideg(pos), -deg2centideg(pos)
+                self._log("  Executing both motors...")
+                # Run both motors in separate threads
+                import threading
+                t1 = threading.Thread(target=lambda: controller.sin_motion(1, amplitude_m1, period, center, duration))
+                t2 = threading.Thread(target=lambda: controller.sin_motion(2, amplitude_m2, period, center, duration))
+                t1.start()
+                t2.start()
+                t1.join()
+                t2.join()
+            
+            controller.stop_all()
+            controller.disconnect()
+            self._log("✓ Torque control complete")
 
-        self._send(*make_motor_packet("A", *get_angles(b)))
-        self._log(f"→ Swing to {b}°")
-        time.sleep(2)
-
-        self._send(*make_motor_packet("A", *get_angles(a)))
-        self._log(f"← Swing to {a}°")
-        time.sleep(2)
-
-        self._send_stop()
-        self._log("✓ Swing complete")
+        except Exception as e:
+            self._log(f"⚠ Torque control error: {e}")
+            import traceback
+            self._log(traceback.format_exc())
 
     def _toggle_demo_mode(self):
         """Toggle demo mode - launches EMG plotter and simulation control"""
@@ -2475,39 +2585,29 @@ class ExoPulseGUI(QMainWindow):
             self._stop_demo()
 
     def _start_demo(self):
-        """Start demo mode with EMG plotter"""
+        """Start demo mode - receives exo data from experiment_menu broadcaster"""
         try:
-            # Launch EMG plotter in separate process
-            ui_dir = Path(__file__).parent
-            emg_script = ui_dir / "emg_plotter.py"
-            
-            if emg_script.exists():
-                # Find available serial port for EMG plotter
-                import glob
-                available_ports = glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*')
-                
-                if available_ports:
-                    emg_port = available_ports[0]
-                    self._log(f"📊 Launching EMG Plotter on {emg_port}")
-                    self.emg_process = subprocess.Popen(
-                        [sys.executable, str(emg_script), '--port', emg_port],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
-                else:
-                    self._log("⚠ No serial port available for EMG Plotter")
-            else:
-                self._log(f"⚠ EMG script not found: {emg_script}")
-            
-            # Prepare for simulation control thread (待實現)
+            # Connect to exo data broadcaster (experiment_menu TCP server)
+            self._log("🔗 Connecting to Exo Data Broadcaster (port 9998)...")
+            self._update_demo_button_color("waiting")
+
             self.demo_stop_event.clear()
-            # TODO: self.demo_thread = threading.Thread(target=self._run_simulation_control, daemon=True)
-            # TODO: self.demo_thread.start()
-            
+            self.demo_connected = False
+            self.last_exo_data_time = 0.0
+
+            # Start simulation control thread (TCP client)
+            self.demo_thread = threading.Thread(target=self._run_simulation_control, daemon=True)
+            self.demo_thread.start()
+
+            # Start status timer to update button color
+            self.exo_status_timer = QTimer()
+            self.exo_status_timer.timeout.connect(self._check_exo_data_status)
+            self.exo_status_timer.start(500)  # Check every 500ms
+
             self._log("🚶 Demo started")
             self.btn_demo.setText("Stop Demo")
             self.in_demo = True
-            
+
         except Exception as e:
             self._log(f"⚠ Demo start error: {e}")
             import traceback
@@ -2516,35 +2616,179 @@ class ExoPulseGUI(QMainWindow):
     def _stop_demo(self):
         """Stop demo mode"""
         try:
+            # Stop status timer
+            if self.exo_status_timer:
+                self.exo_status_timer.stop()
+                self.exo_status_timer = None
+
             # Stop simulation control thread
             self.demo_stop_event.set()
             if self.demo_thread:
                 self.demo_thread.join(timeout=1.0)
                 self.demo_thread = None
-            
-            # Terminate EMG plotter
-            if self.emg_process:
-                self.emg_process.terminate()
+
+            # Close TCP connection to exo data broadcaster
+            if self.demo_tcp_sock:
                 try:
-                    self.emg_process.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    self.emg_process.kill()
-                self.emg_process = None
-                self._log("📊 EMG Plotter closed")
-            
+                    self.demo_tcp_sock.close()
+                except:
+                    pass
+                self.demo_tcp_sock = None
+                self.demo_connected = False
+                self._log("🔌 Exo data connection closed")
+
             self._send_stop()
             self._log("🛑 Demo stopped")
             self.btn_demo.setText("Start Demo")
+            self._update_demo_button_color("off")
             self.in_demo = False
-            
+
         except Exception as e:
             self._log(f"⚠ Demo stop error: {e}")
     
     def _run_simulation_control(self):
-        """Simulation control thread - 待你提供 torque/degree 控制邏輯"""
-        # TODO: 在這裡實現模擬控制邏輯
-        # 當你提供 torque 或 degree 控制指令後，會在這裡實現
-        pass
+        """Simulation control thread - receives exo data from experiment_menu broadcaster"""
+        EXO_BROADCASTER_HOST = "127.0.0.1"
+        EXO_BROADCASTER_PORT = 9998
+        RECONNECT_DELAY = 2.0
+
+        buffer = ""
+
+        while not self.demo_stop_event.is_set():
+            # Connect to broadcaster if not connected
+            if self.demo_tcp_sock is None:
+                try:
+                    self.demo_tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    self.demo_tcp_sock.settimeout(1.0)
+                    self.demo_tcp_sock.connect((EXO_BROADCASTER_HOST, EXO_BROADCASTER_PORT))
+                    self.demo_connected = True
+                    self._log(f"✓ Connected to Exo Broadcaster at {EXO_BROADCASTER_HOST}:{EXO_BROADCASTER_PORT}")
+                except (socket.timeout, ConnectionRefusedError, OSError) as e:
+                    self.demo_tcp_sock = None
+                    self.demo_connected = False
+                    # Wait before retry
+                    for _ in range(int(RECONNECT_DELAY * 10)):
+                        if self.demo_stop_event.is_set():
+                            return
+                        time.sleep(0.1)
+                    continue
+
+            # Receive data
+            try:
+                data = self.demo_tcp_sock.recv(4096)
+                if not data:
+                    # Connection closed by server
+                    self._log("⚠ Exo broadcaster connection lost")
+                    self.demo_tcp_sock.close()
+                    self.demo_tcp_sock = None
+                    self.demo_connected = False
+                    continue
+
+                buffer += data.decode('utf-8')
+
+                # Process complete JSON lines
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    if line.strip():
+                        try:
+                            exo_data = json.loads(line)
+                            self.latest_exo_data = exo_data
+                            self.last_exo_data_time = time.time()
+
+                            # Extract data: la=left_angle, lt=left_torque, ra=right_angle, rt=right_torque
+                            # Data is in radians, convert to degrees for display
+                            import math
+                            la_deg = math.degrees(exo_data.get('la', 0))
+                            ra_deg = math.degrees(exo_data.get('ra', 0))
+                            lt = exo_data.get('lt')
+                            rt = exo_data.get('rt')
+
+                            # Throttled debug output (every 3 seconds)
+                            if not hasattr(self, '_last_exo_log_time'):
+                                self._last_exo_log_time = 0
+                            if time.time() - self._last_exo_log_time >= 3.0:
+                                self._last_exo_log_time = time.time()
+                                lt_str = f"{lt:.2f}" if lt is not None else "N/A"
+                                rt_str = f"{rt:.2f}" if rt is not None else "N/A"
+                                self._log(f"📡 [Exo] L:{la_deg:6.1f}° R:{ra_deg:6.1f}° | T L:{lt_str}Nm R:{rt_str}Nm")
+
+                            # Update motor_data for plot display (Motor 1 = Right, Motor 2 = Left)
+                            elapsed = time.time() - self.start_time
+                            # Motor 1: Right side
+                            self.motor_data[1]['time'].append(elapsed)
+                            self.motor_data[1]['angle'].append(ra_deg)
+                            self.motor_data[1]['current'].append(rt if rt is not None else 0)
+                            self.motor_data[1]['temp'].append(0)
+                            self.motor_data[1]['speed'].append(0)
+                            self.motor_data[1]['acceleration'].append(0)
+                            # Motor 2: Left side
+                            self.motor_data[2]['time'].append(elapsed)
+                            self.motor_data[2]['angle'].append(la_deg)
+                            self.motor_data[2]['current'].append(lt if lt is not None else 0)
+                            self.motor_data[2]['temp'].append(0)
+                            self.motor_data[2]['speed'].append(0)
+                            self.motor_data[2]['acceleration'].append(0)
+
+                        except json.JSONDecodeError:
+                            pass  # Skip malformed lines
+
+            except socket.timeout:
+                # Normal timeout, continue loop
+                continue
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                self._log("⚠ Exo broadcaster connection reset")
+                if self.demo_tcp_sock:
+                    try:
+                        self.demo_tcp_sock.close()
+                    except:
+                        pass
+                self.demo_tcp_sock = None
+                self.demo_connected = False
+
+        # Cleanup on exit
+        if self.demo_tcp_sock:
+            try:
+                self.demo_tcp_sock.close()
+            except:
+                pass
+            self.demo_tcp_sock = None
+        self.demo_connected = False
+
+    def _update_demo_button_color(self, state: str):
+        """Update demo button color based on connection state
+
+        Args:
+            state: "off" (gray), "waiting" (yellow), "receiving" (green), "disconnected" (red)
+        """
+        colors = {
+            "off": "#555555",        # Gray - not in demo mode
+            "waiting": "#FFA500",    # Orange/Yellow - connecting/waiting
+            "receiving": "#00AA00",  # Green - receiving data
+            "disconnected": "#AA0000"  # Red - connection lost
+        }
+        color = colors.get(state, colors["off"])
+        self.btn_demo.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold;")
+
+    def _check_exo_data_status(self):
+        """Timer callback to check exo data reception status and update button color"""
+        if not self.in_demo:
+            return
+
+        current_time = time.time()
+        DATA_TIMEOUT = 2.0  # Seconds without data before showing disconnected
+
+        if self.demo_connected and self.last_exo_data_time > 0:
+            elapsed = current_time - self.last_exo_data_time
+            if elapsed < DATA_TIMEOUT:
+                self._update_demo_button_color("receiving")
+            else:
+                self._update_demo_button_color("disconnected")
+        elif self.demo_connected:
+            # Connected but no data yet
+            self._update_demo_button_color("waiting")
+        else:
+            # Not connected, still trying
+            self._update_demo_button_color("waiting")
 
     def _toggle_record(self):
         """Toggle recording"""
