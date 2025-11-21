@@ -1,11 +1,13 @@
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Preferences.h>
 #include "output_mode.h"
 
 /*
  * WiFi Pairing Module
  * Handles WiFi STA connection and TCP server for motor data transmission
+ * Supports auto-reconnect on boot using saved credentials
  */
 
 // Forward declaration of command processor (defined in serial_commands.h)
@@ -20,8 +22,9 @@ constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;  // 20 seconds
 // Global objects
 WiFiServer server(TCP_PORT);
 WiFiClient client;
+Preferences preferences;
 
-// WiFi credentials (configured via Serial command)
+// WiFi credentials (configured via Serial command or loaded from NVS)
 String wifi_ssid = "";
 String wifi_password = "";
 bool wifiInitialized = false;
@@ -32,6 +35,71 @@ uint32_t connectionStartTime = 0;
 uint32_t packetsSent = 0;
 uint32_t bytesSent = 0;
 uint32_t lastRSSISendTime = 0;
+
+// Forward declarations
+bool connectToWiFi(const String& ssid, const String& password);
+
+/**
+ * Save WiFi credentials to NVS (non-volatile storage)
+ */
+void saveWiFiCredentials() {
+    preferences.begin("wifi", false);  // Read/Write mode
+    preferences.putString("ssid", wifi_ssid);
+    preferences.putString("password", wifi_password);
+    preferences.end();
+    Serial.println(F("[WiFi] Credentials saved to NVS"));
+}
+
+/**
+ * Load WiFi credentials from NVS
+ * @return true if credentials were found and loaded
+ */
+bool loadWiFiCredentials() {
+    preferences.begin("wifi", true);  // Read-only mode
+    wifi_ssid = preferences.getString("ssid", "");
+    wifi_password = preferences.getString("password", "");
+    preferences.end();
+
+    if (wifi_ssid.length() > 0) {
+        Serial.print(F("[WiFi] Loaded saved SSID: "));
+        Serial.println(wifi_ssid);
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Clear saved WiFi credentials from NVS
+ */
+void clearSavedCredentials() {
+    preferences.begin("wifi", false);
+    preferences.clear();
+    preferences.end();
+    Serial.println(F("[WiFi] Saved credentials cleared from NVS"));
+}
+
+/**
+ * Auto-connect to WiFi using saved credentials
+ * Called during system boot
+ * @return true if connected successfully
+ */
+bool autoConnectWiFi() {
+    Serial.println(F("\n[WiFi] Checking for saved credentials..."));
+
+    if (loadWiFiCredentials()) {
+        Serial.println(F("[WiFi] Attempting auto-connect to saved network..."));
+        if (connectToWiFi(wifi_ssid, wifi_password)) {
+            Serial.println(F("[WiFi] ✓ Auto-connect successful!"));
+            return true;
+        } else {
+            Serial.println(F("[WiFi] ⚠ Auto-connect failed"));
+            return false;
+        }
+    } else {
+        Serial.println(F("[WiFi] No saved credentials found"));
+        return false;
+    }
+}
 
 /**
  * Connect to WiFi network
@@ -72,6 +140,10 @@ bool connectToWiFi(const String& ssid, const String& password) {
         Serial.print(F("[WiFi] Signal Strength (RSSI): "));
         Serial.print(WiFi.RSSI());
         Serial.println(F(" dBm"));
+
+        // Save credentials to NVS for auto-reconnect on next boot
+        saveWiFiCredentials();
+
         return true;
     } else {
         wifiConnected = false;
@@ -125,6 +197,9 @@ void disconnectWiFi() {
         WiFi.disconnect();
         Serial.println(F("[WiFi] WiFi disconnected"));
     }
+
+    // Clear saved credentials so it won't auto-connect on next boot
+    clearSavedCredentials();
 
     wifiConnected = false;
     wifiInitialized = false;

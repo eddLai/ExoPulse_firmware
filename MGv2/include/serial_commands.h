@@ -42,14 +42,7 @@ String formatMotorData(const MotorStatus& status, int64_t offset) {
     int64_t correctedAngle = status.motorAngle - offset;
     float angleDeg = (float)correctedAngle * 0.01;
 
-    // Limit angle to ±360 degrees
-    if (angleDeg > 360.0) {
-        angleDeg = 360.0;
-    } else if (angleDeg < -360.0) {
-        angleDeg = -360.0;
-    }
-
-    // Check for overflow
+    // Check for overflow (±90 trillion degrees, far beyond practical limits)
     if (correctedAngle > 9007199254740992LL || correctedAngle < -9007199254740992LL) {
         data += "ovf";
     } else {
@@ -117,14 +110,7 @@ void printDetailedStatus(const MotorStatus& status, int64_t offset) {
     int64_t detailedCorrectedAngle = status.motorAngle - offset;
     float detailedAngleDeg = (float)detailedCorrectedAngle * 0.01;
 
-    // Limit angle to ±360 degrees
-    if (detailedAngleDeg > 360.0) {
-        detailedAngleDeg = 360.0;
-    } else if (detailedAngleDeg < -360.0) {
-        detailedAngleDeg = -360.0;
-    }
-
-    // Check for overflow
+    // Check for overflow (±90 trillion degrees, far beyond practical limits)
     if (detailedCorrectedAngle > 9007199254740992LL || detailedCorrectedAngle < -9007199254740992LL) {
         Serial.print("ovf");
         Serial.print(" °  (ovf turns) [RAW: 0x");

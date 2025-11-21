@@ -272,6 +272,18 @@ void setup() {
     );
 
     Serial.println("    Tasks created successfully!");
+
+    // Try to auto-connect to WiFi if credentials are saved
+    Serial.println("\n[7] WiFi Auto-Connect...");
+    if (WiFiPairing::autoConnectWiFi()) {
+        // Auto-connect successful, start TCP server
+        if (WiFiPairing::startTCPServer()) {
+            Serial.println("[WiFi] Auto-connect complete! TCP server ready.");
+        }
+    } else {
+        Serial.println("[WiFi] Auto-connect skipped. Use WIFI_CONFIG command to configure.");
+    }
+
     Serial.println("\n[OK] Dual Motor Status Reader ready!");
     Serial.println("========================================");
     Serial.print("Monitoring Motors: ID=");

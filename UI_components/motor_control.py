@@ -163,6 +163,7 @@ class WiFiConfigDialog(QWidget):
         self.wifi_ssid = ""
         self.wifi_rssi = ""
         self.wifi_mac = ""
+        self.no_serial_port = False  # Track if no serial port is available
 
         self.setWindowTitle("WiFi Configuration")
         self.setFixedSize(650, 500)
@@ -281,6 +282,17 @@ class WiFiConfigDialog(QWidget):
         self.password_input.setEchoMode(QLineEdit.Password)
         pass_row.addWidget(self.password_input)
         cred_layout.addLayout(pass_row)
+
+        # IP address input (for testing without serial)
+        ip_row = QHBoxLayout()
+        ip_label = QLabel("ESP32 IP:")
+        ip_label.setFixedWidth(80)
+        ip_row.addWidget(ip_label)
+        self.ip_input = QLineEdit("10.16.241.20")
+        self.ip_input.setPlaceholderText("e.g. 192.168.1.100")
+        self.ip_input.textChanged.connect(self._on_ip_changed)
+        ip_row.addWidget(self.ip_input)
+        cred_layout.addLayout(ip_row)
 
         self.config_group.setLayout(cred_layout)
         layout.addWidget(self.config_group)
@@ -422,6 +434,17 @@ class WiFiConfigDialog(QWidget):
         import time
         import re
 
+        # Check if serial port is valid
+        if not self.serial_port or self.serial_port.startswith("No "):
+            self._log("ℹ No serial port connected")
+            self._log("  Connect ESP32 via USB to check WiFi status")
+            self.wifi_connected = False
+            self.no_serial_port = True
+            self._update_ui_for_status()
+            return
+
+        self.no_serial_port = False
+
         try:
             # Open serial port
             self._log(f"Opening {self.serial_port}...")
@@ -559,6 +582,45 @@ class WiFiConfigDialog(QWidget):
                 Q_ARG(bool, False)
             )
 
+            # If no serial port, disable configure button but enable test if we have IP
+            if hasattr(self, 'no_serial_port') and self.no_serial_port:
+                QMetaObject.invokeMethod(
+                    self.configure_btn, "setEnabled", Qt.QueuedConnection,
+                    Q_ARG(bool, False)
+                )
+                # Enable test button if we have a valid IP from input or saved
+                import re
+                ip_pattern = r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
+                input_ip = self.ip_input.text().strip() if hasattr(self, 'ip_input') else ""
+                has_valid_ip = bool(re.match(ip_pattern, input_ip))
+                if has_valid_ip:
+                    self.esp32_ip = input_ip
+                QMetaObject.invokeMethod(
+                    self.test_btn, "setEnabled", Qt.QueuedConnection,
+                    Q_ARG(bool, has_valid_ip)
+                )
+            else:
+                QMetaObject.invokeMethod(
+                    self.configure_btn, "setEnabled", Qt.QueuedConnection,
+                    Q_ARG(bool, True)
+                )
+
+    def _on_ip_changed(self, text):
+        """Handle IP input change - enable test button if valid IP entered"""
+        import re
+        # Check if it looks like a valid IP
+        ip_pattern = r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'
+        is_valid_ip = bool(re.match(ip_pattern, text.strip()))
+
+        if is_valid_ip:
+            self.esp32_ip = text.strip()
+            # Enable test button when we have a valid IP
+            if hasattr(self, 'no_serial_port') and self.no_serial_port:
+                self.test_btn.setEnabled(True)
+        else:
+            if hasattr(self, 'no_serial_port') and self.no_serial_port:
+                self.test_btn.setEnabled(False)
+
     def _start_disconnect(self):
         """Start WiFi disconnection"""
         import threading
@@ -570,6 +632,11 @@ class WiFiConfigDialog(QWidget):
         """Disconnect from WiFi (runs in thread)"""
         import serial as ser_module
         import time
+
+        # Check if serial port is valid
+        if not self.serial_port or self.serial_port.startswith("No "):
+            self._log("✗ No serial port available")
+            return
 
         try:
             # Open serial port
@@ -673,15 +740,27 @@ class WiFiConfigDialog(QWidget):
 
     def _configure_wifi(self):
         """Configure ESP32 WiFi (runs in thread)"""
+        import serial as ser_module
+        import time
+
+        # Check if serial port is valid
+        if not self.serial_port or self.serial_port.startswith("No "):
+            self._log("✗ No serial port available")
+            self._log("  Connect ESP32 via USB to configure WiFi")
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(
+                self.configure_btn, "setEnabled", Qt.QueuedConnection,
+                Q_ARG(bool, True)
+            )
+            return
+
         ssid = self.ssid_input.text()
         password = self.password_input.text()
 
         try:
             # Open serial port
             self._log(f"Opening {self.serial_port}...")
-            import serial as ser_module
             self.ser = ser_module.Serial(self.serial_port, 115200, timeout=2)
-            import time
             time.sleep(0.5)
 
             # Clear input buffer to avoid reading old motor data
@@ -822,12 +901,10 @@ class WiFiConfigDialog(QWidget):
                             self._log(line)
                 self._log("─" * 50)
                 self._log("✓ Connection test successful!")
+                self._log("🔄 Switching to WiFi mode...")
 
-                # Ask if user wants to switch to WiFi mode
-                self._log("ℹ Click 'Close' to switch main GUI to WiFi mode")
-
-                # Signal success - emit only after user closes dialog
-                # This will be handled by the Close button
+                # Emit signal to switch main GUI to WiFi mode
+                self.config_complete.emit(self.esp32_ip, self.esp32_port)
 
             else:
                 self._log("⚠ No response received from ESP32")
