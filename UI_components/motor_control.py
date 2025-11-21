@@ -143,6 +143,377 @@ class IMU3DWindow(QWidget):
         self.canvas.draw_idle()
 
 ##############################################################################
+# WiFi Configuration Dialog
+##############################################################################
+class WiFiConfigDialog(QWidget):
+    """WiFi Configuration Dialog integrated into main GUI"""
+
+    config_complete = Signal(str, int)  # Signal: (ip, port)
+
+    def __init__(self, parent=None, serial_port='/dev/ttyACM0'):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+        self.serial_port = serial_port
+        self.ser = None
+        self.esp32_ip = None
+        self.esp32_port = 8888
+
+        self.setWindowTitle("WiFi Configuration")
+        self.setFixedSize(650, 450)
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #2C3E50;
+                color: #ECF0F1;
+            }
+            QGroupBox {
+                border: 2px solid #34495E;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding: 10px;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+            QLineEdit {
+                background-color: #34495E;
+                border: 1px solid #566573;
+                border-radius: 3px;
+                padding: 5px;
+                color: #ECF0F1;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #3498DB, stop:1 #2980B9);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #5DADE2, stop:1 #3498DB);
+            }
+            QPushButton:disabled {
+                background-color: #7F8C8D;
+                color: #BDC3C7;
+            }
+            QLabel {
+                color: #ECF0F1;
+                padding: 2px;
+            }
+        """)
+        self._init_ui()
+
+    def _init_ui(self):
+        """Initialize UI"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        # Title
+        title = QLabel("ESP32 WiFi Configuration")
+        title.setStyleSheet("font-size: 16pt; font-weight: bold; color: #3498DB; padding: 10px;")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        # WiFi credentials
+        cred_group = QGroupBox("WiFi Credentials")
+        cred_layout = QVBoxLayout()
+
+        ssid_row = QHBoxLayout()
+        ssid_label = QLabel("SSID:")
+        ssid_label.setFixedWidth(80)
+        ssid_row.addWidget(ssid_label)
+        self.ssid_input = QLineEdit("ExoPulse")
+        ssid_row.addWidget(self.ssid_input)
+        cred_layout.addLayout(ssid_row)
+
+        pass_row = QHBoxLayout()
+        pass_label = QLabel("Password:")
+        pass_label.setFixedWidth(80)
+        pass_row.addWidget(pass_label)
+        self.password_input = QLineEdit("12345666")
+        self.password_input.setEchoMode(QLineEdit.Password)
+        pass_row.addWidget(self.password_input)
+        cred_layout.addLayout(pass_row)
+
+        cred_group.setLayout(cred_layout)
+        layout.addWidget(cred_group)
+
+        # Log display
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("background-color: #34495E; color: #ECF0F1; font-family: monospace; border: 1px solid #566573; border-radius: 3px;")
+        layout.addWidget(self.log_text)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        self.configure_btn = QPushButton("⚙ Configure WiFi")
+        self.configure_btn.setMinimumHeight(40)
+        self.configure_btn.clicked.connect(self._start_configuration)
+        button_layout.addWidget(self.configure_btn)
+
+        self.test_btn = QPushButton("🔍 Test Connection")
+        self.test_btn.setMinimumHeight(40)
+        self.test_btn.setEnabled(False)  # Disabled until configuration succeeds
+        self.test_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #27AE60, stop:1 #229954);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2ECC71, stop:1 #27AE60);
+            }
+            QPushButton:disabled {
+                background-color: #7F8C8D;
+                color: #BDC3C7;
+            }
+        """)
+        self.test_btn.clicked.connect(self._test_connection)
+        button_layout.addWidget(self.test_btn)
+
+        self.close_btn = QPushButton("✕ Close")
+        self.close_btn.setMinimumHeight(40)
+        self.close_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #E74C3C, stop:1 #C0392B);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #EC7063, stop:1 #E74C3C);
+            }
+        """)
+        self.close_btn.clicked.connect(self._on_close)
+        button_layout.addWidget(self.close_btn)
+
+        layout.addLayout(button_layout)
+
+    def _log(self, message):
+        """Add log message (thread-safe)"""
+        from PySide6.QtCore import QMetaObject, Q_ARG
+        QMetaObject.invokeMethod(
+            self.log_text,
+            "append",
+            Qt.QueuedConnection,
+            Q_ARG(str, message)
+        )
+
+    def _start_configuration(self):
+        """Start WiFi configuration"""
+        import threading
+        self.configure_btn.setEnabled(False)
+        self._log("Starting WiFi configuration...")
+        threading.Thread(target=self._configure_wifi, daemon=True).start()
+
+    def _configure_wifi(self):
+        """Configure ESP32 WiFi (runs in thread)"""
+        ssid = self.ssid_input.text()
+        password = self.password_input.text()
+
+        try:
+            # Open serial port
+            self._log(f"Opening {self.serial_port}...")
+            import serial as ser_module
+            self.ser = ser_module.Serial(self.serial_port, 115200, timeout=2)
+            import time
+            time.sleep(0.5)
+
+            # Clear input buffer to avoid reading old motor data
+            self.ser.reset_input_buffer()
+            self._log("Cleared serial buffer")
+
+            # Send WiFi config
+            self._log(f"Sending: WIFI_CONFIG {ssid} ****")
+            self.ser.write(f"WIFI_CONFIG {ssid} {password}\n".encode())
+            self.ser.flush()
+
+            # Read response
+            self._log("Waiting for ESP32 response...")
+            start_time = time.time()
+            ip_address = None
+
+            while time.time() - start_time < 20:
+                if self.ser.in_waiting:
+                    line = self.ser.readline().decode(errors='ignore').strip()
+                    if line:
+                        # Only log WiFi-related messages (filter out motor data)
+                        if any(keyword in line for keyword in ['WiFi', 'wifi', 'WIFI', 'IP:', 'CMD', 'Connecting', 'Connected']):
+                            self._log(line)
+
+                        # Check for IP (matches both "IP:" and "IP Address:")
+                        if "IP" in line and any(char.isdigit() for char in line):
+                            import re
+                            match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
+                            if match:
+                                ip_address = match.group(1)
+                                self._log(f"✓ Found IP: {ip_address}")
+                                break
+
+            self.ser.close()
+
+            if ip_address:
+                self._log("✓ WiFi configuration successful!")
+                self._log(f"ℹ You can now test the connection using the 'Test Connection' button")
+                self.esp32_ip = ip_address
+
+                # Enable test button
+                from PySide6.QtCore import QMetaObject, Q_ARG
+                QMetaObject.invokeMethod(
+                    self.test_btn,
+                    "setEnabled",
+                    Qt.QueuedConnection,
+                    Q_ARG(bool, True)
+                )
+
+                # Re-enable configure button for re-configuration if needed
+                QMetaObject.invokeMethod(
+                    self.configure_btn,
+                    "setEnabled",
+                    Qt.QueuedConnection,
+                    Q_ARG(bool, True)
+                )
+
+                # Don't auto-close, let user test first
+                # self.close()
+            else:
+                self._log("✗ Failed to get IP address")
+                self.configure_btn.setEnabled(True)
+
+        except Exception as e:
+            self._log(f"✗ Error: {e}")
+            self.configure_btn.setEnabled(True)
+
+    def _on_close(self):
+        """Handle close button - emit signal if configured successfully"""
+        if self.esp32_ip:
+            # WiFi was configured successfully, notify main GUI
+            self.config_complete.emit(self.esp32_ip, self.esp32_port)
+        self.close()
+
+    def _test_connection(self):
+        """Test WiFi connection by sending WIFI_STATUS command"""
+        import threading
+        self._log("🔍 Testing connection...")
+        self.test_btn.setEnabled(False)
+        threading.Thread(target=self._test_connection_thread, daemon=True).start()
+
+    def _test_connection_thread(self):
+        """Test connection in background thread"""
+        import socket
+        import time
+
+        try:
+            if not self.esp32_ip:
+                self._log("✗ No IP address configured")
+                return
+
+            # Try to connect via TCP
+            self._log(f"Connecting to {self.esp32_ip}:{self.esp32_port}...")
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((self.esp32_ip, self.esp32_port))
+            self._log("✓ TCP connection established")
+
+            # Send WIFI_STATUS command
+            self._log("Sending WIFI_STATUS command...")
+            sock.send(b"WIFI_STATUS\n")
+            time.sleep(0.5)
+
+            # Receive response
+            self._log("Receiving status...")
+            sock.settimeout(3)
+            response = b""
+            start_time = time.time()
+
+            while time.time() - start_time < 3:
+                try:
+                    chunk = sock.recv(1024)
+                    if chunk:
+                        response += chunk
+                    else:
+                        break
+                except socket.timeout:
+                    break
+
+            sock.close()
+
+            if response:
+                # Parse and display response
+                lines = response.decode('utf-8', errors='ignore').split('\n')
+                self._log("─" * 50)
+                for line in lines:
+                    line = line.strip()
+                    if line and not line.startswith('['):
+                        # Filter out motor data, only show WiFi status
+                        if any(keyword in line for keyword in ['WiFi', 'Status', 'SSID', 'IP', 'MAC', 'RSSI', 'TCP', 'Client', 'Connection', '=====']):
+                            self._log(line)
+                self._log("─" * 50)
+                self._log("✓ Connection test successful!")
+
+                # Ask if user wants to switch to WiFi mode
+                self._log("ℹ Click 'Close' to switch main GUI to WiFi mode")
+
+                # Signal success - emit only after user closes dialog
+                # This will be handled by the Close button
+
+            else:
+                self._log("⚠ No response received from ESP32")
+
+            # Re-enable test button
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(
+                self.test_btn,
+                "setEnabled",
+                Qt.QueuedConnection,
+                Q_ARG(bool, True)
+            )
+
+        except socket.timeout:
+            self._log("✗ Connection timeout - ESP32 not responding")
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(
+                self.test_btn,
+                "setEnabled",
+                Qt.QueuedConnection,
+                Q_ARG(bool, True)
+            )
+        except ConnectionRefusedError:
+            self._log("✗ Connection refused - TCP server not running on ESP32")
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(
+                self.test_btn,
+                "setEnabled",
+                Qt.QueuedConnection,
+                Q_ARG(bool, True)
+            )
+        except Exception as e:
+            self._log(f"✗ Connection test failed: {e}")
+            from PySide6.QtCore import QMetaObject, Q_ARG
+            QMetaObject.invokeMethod(
+                self.test_btn,
+                "setEnabled",
+                Qt.QueuedConnection,
+                Q_ARG(bool, True)
+            )
+
+##############################################################################
 # Main Enhanced GUI
 ##############################################################################
 class ExoPulseGUI(QMainWindow):
@@ -215,6 +586,22 @@ class ExoPulseGUI(QMainWindow):
         self.max_reconnect_attempts = 5
         self.serial_lock = threading.Lock()
 
+        # Bidirectional transmission test
+        self.test_running = False
+        self.test_start_time = 0  # Test start timestamp (ms)
+        self.ping_seq = 0
+        self.ping_sent_times = {}  # Map seq -> sent timestamp (ms)
+        self.latency_history = deque(maxlen=10)  # Last 10 RTT measurements
+        self.current_rtt = 0
+
+        # Packet loss tracking (per motor)
+        self.last_motor1_seq = None
+        self.last_motor2_seq = None
+        self.motor1_packets_received = 0
+        self.motor2_packets_received = 0
+        self.motor1_packets_lost = 0
+        self.motor2_packets_lost = 0
+
         # Display settings - Default: current, angle, acceleration only
         self.visible_plots = {
             'temp': False,
@@ -246,6 +633,10 @@ class ExoPulseGUI(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self._pump_data_queue)
         self.timer.start(int(1000 / self.PLOT_HZ))
+
+        # PING timer for bidirectional test (controlled by _toggle_test)
+        self.ping_timer = QTimer()
+        self.ping_timer.timeout.connect(self._send_ping)
 
     def setup_ui(self):
         """Build the user interface with sidebar"""
@@ -879,12 +1270,12 @@ class ExoPulseGUI(QMainWindow):
         btn_serial_plot = QPushButton("📊  Serial Plotter")
         btn_serial_plot.clicked.connect(lambda: (self._launch_serial_plotter(), dialog.accept()))
         layout.addWidget(btn_serial_plot)
-        
-        # WiFi Configuration & Monitor
-        btn_wifi = QPushButton("📶  WiFi Configuration")
-        btn_wifi.clicked.connect(lambda: (self._launch_wifi_monitor(), dialog.accept()))
-        layout.addWidget(btn_wifi)
-        
+
+        # WiFi Monitor
+        btn_wifi_monitor = QPushButton("📡  WiFi Monitor")
+        btn_wifi_monitor.clicked.connect(lambda: (self._launch_wifi_monitor(), dialog.accept()))
+        layout.addWidget(btn_wifi_monitor)
+
         dialog.setLayout(layout)
         dialog.exec()
 
@@ -900,27 +1291,272 @@ class ExoPulseGUI(QMainWindow):
         else:
             QMessageBox.warning(self, "Error", "serial_plotter.py not found")
 
-    def _launch_wifi_config(self):
-        """Launch WiFi Configuration and Monitor"""
-        import subprocess
-        script = Path(__file__).parent / 'auto_wifi_setup.py'
-        if script.exists():
-            # Launch WiFi configuration tool (GUI app)
-            subprocess.Popen([sys.executable, str(script)])
-            self._log("📡 Launching WiFi Configuration...")
-        else:
-            QMessageBox.warning(self, "Error", "auto_wifi_setup.py not found")
-
     def _launch_wifi_monitor(self):
-        """Launch WiFi Configuration and Monitor (from Debug Tools)"""
-        import subprocess
-        script = Path(__file__).parent / 'auto_wifi_setup.py'
-        if script.exists():
-            # Launch WiFi configuration tool (GUI app)
-            # Will show config page if no args provided
-            subprocess.Popen([sys.executable, str(script)])
+        """Launch WiFi Monitor window"""
+        # Check if we have ESP32 IP
+        if not hasattr(self, 'tcp_sock') or self.tcp_sock is None:
+            QMessageBox.warning(
+                self,
+                "WiFi Not Connected",
+                "Please configure WiFi first using the 'WiFi Configuration' button."
+            )
+            return
+
+        # Import WiFiSignalMonitor from auto_wifi_setup
+        try:
+            from auto_wifi_setup import WiFiSignalMonitor
+            global ESP32_IP, ESP32_PORT
+
+            # Create and show WiFi monitor window
+            if not hasattr(self, 'wifi_monitor') or self.wifi_monitor is None:
+                self.wifi_monitor = WiFiSignalMonitor(esp32_ip=ESP32_IP, esp32_port=ESP32_PORT)
+
+            self.wifi_monitor.show()
+            self._log("✓ WiFi Monitor opened")
+
+        except ImportError as e:
+            QMessageBox.warning(self, "Error", f"Failed to import WiFi Monitor: {e}")
+
+    def _launch_wifi_config(self):
+        """Launch WiFi Configuration as integrated dialog"""
+        self._log("📡 Opening WiFi Configuration...")
+
+        # Clean up existing connections based on current mode
+        if self.current_mode == "uart":
+            # Stop UART to free serial port
+            self.stop_uart_evt.set()
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.close()
+                    self._log("🔌 Temporarily closed UART for WiFi configuration")
+                except:
+                    pass
+        elif self.current_mode == "wifi":
+            # Stop existing WiFi connections to avoid resource conflicts
+            self._log("🔌 Closing existing WiFi connections for reconfiguration...")
+
+            # Stop UDP/TCP listeners
+            self.stop_udp_evt.set()
+
+            # Close TCP socket
+            if self.tcp_sock:
+                try:
+                    self.tcp_sock.close()
+                    self._log("✓ Closed TCP connection")
+                except:
+                    pass
+                self.tcp_sock = None
+
+            # Give listeners time to stop
+            import time
+            time.sleep(0.5)
+
+        # Get current port
+        port = self.combo_com.currentText() if hasattr(self, 'combo_com') else self.detected_uart_port
+
+        # Create and show dialog
+        self.wifi_dialog = WiFiConfigDialog(self, serial_port=port)
+        self.wifi_dialog.config_complete.connect(self._on_wifi_config_complete)
+        self.wifi_dialog.show()
+
+    def _on_wifi_config_complete(self, ip, port):
+        """Handle successful WiFi configuration"""
+        self._log(f"✓ WiFi configuration complete: {ip}:{port}")
+
+        # Update ESP32 connection info
+        global ESP32_IP, ESP32_PORT
+        ESP32_IP = ip
+        ESP32_PORT = port
+
+        # Switch to WiFi mode
+        self.current_mode = "wifi"
+        self.stop_udp_evt.clear()
+
+        # Update UI
+        self.comm_status_label.setText("WiFi")
+        self.comm_status_label.setStyleSheet("""
+            QLabel {
+                background-color: #27AE60;
+                color: white;
+                padding: 5px 10px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+        """)
+        self.comm_info_label.setText(f"{ip}:{port}")
+
+        self._log(f"✓ Switched to WiFi mode: {ip}:{port}")
+
+        # Start WiFi connections
+        self._connect_tcp_async()
+        self._start_udp_listener()
+
+    # ========== Bidirectional Test Functions ==========
+    def _toggle_test(self):
+        """Toggle bidirectional transmission test"""
+        if not self.test_running:
+            # Start test
+            self.test_running = True
+            if hasattr(self, 'test_btn'):
+                self.test_btn.setText("■ Stop Test")
+                self.test_btn.setStyleSheet("""
+                    QPushButton {
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                            stop:0 #E74C3C, stop:1 #C0392B);
+                        color: white;
+                        border: none;
+                        border-radius: 5px;
+                        font-size: 11pt;
+                        font-weight: bold;
+                        padding: 8px;
+                    }
+                    QPushButton:hover {
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                            stop:0 #EC7063, stop:1 #E74C3C);
+                    }
+                """)
+
+            # Reset test statistics and record start time
+            self.test_start_time = int(time.time() * 1000)
+            self.ping_seq = 0
+            self.ping_sent_times.clear()
+            self.latency_history.clear()
+            self.last_motor1_seq = None
+            self.last_motor2_seq = None
+            self.motor1_packets_received = 0
+            self.motor2_packets_received = 0
+            self.motor1_packets_lost = 0
+            self.motor2_packets_lost = 0
+
+            # Start PING timer (send PING every 1 second)
+            self.ping_timer.start(1000)
+
+            self._log("[TEST] Bidirectional transmission test started")
         else:
-            QMessageBox.warning(self, "Error", "auto_wifi_setup.py not found")
+            # Stop test
+            self.test_running = False
+            if hasattr(self, 'test_btn'):
+                self.test_btn.setText("▶ Start Test")
+                self.test_btn.setStyleSheet("""
+                    QPushButton {
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                            stop:0 #27AE60, stop:1 #229954);
+                        color: white;
+                        border: none;
+                        border-radius: 5px;
+                        font-size: 11pt;
+                        font-weight: bold;
+                        padding: 8px;
+                    }
+                    QPushButton:hover {
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                            stop:0 #2ECC71, stop:1 #27AE60);
+                    }
+                """)
+
+            # Stop PING timer
+            self.ping_timer.stop()
+
+            self._log("[TEST] Bidirectional transmission test stopped")
+
+    def _send_ping(self):
+        """Send PING request to ESP32 for latency measurement"""
+        if not self.test_running or self.current_mode != "wifi":
+            return
+
+        # Check if TCP socket is connected
+        if not self.tcp_sock:
+            return
+
+        try:
+            self.ping_seq += 1
+            current_time_ms = int(time.time() * 1000)
+
+            # Use relative timestamp from test start
+            relative_timestamp_ms = current_time_ms - self.test_start_time
+            ping_msg = f"[PING] seq:{self.ping_seq} ts:{relative_timestamp_ms}\n"
+
+            # Record absolute sent time for RTT calculation
+            self.ping_sent_times[self.ping_seq] = current_time_ms
+
+            # Send via TCP socket
+            self.tcp_sock.send(ping_msg.encode('utf-8'))
+        except Exception as e:
+            self._log(f"Ping send error: {e}")
+
+    def _update_packet_loss_display(self):
+        """Update packet loss statistics display"""
+        if not self.test_running:
+            return
+
+        # Check if UI elements exist
+        if not hasattr(self, 'm1_loss_label'):
+            return
+
+        # Motor 1 packet loss
+        m1_total = self.motor1_packets_received + self.motor1_packets_lost
+        if m1_total > 0:
+            m1_loss_rate = (self.motor1_packets_lost / m1_total) * 100
+            self.m1_loss_label.setText(f"{m1_loss_rate:.2f}%")
+            if hasattr(self, 'm1_packets_label'):
+                self.m1_packets_label.setText(f"({self.motor1_packets_lost}/{m1_total})")
+
+            # Color code based on loss rate
+            if m1_loss_rate < 1.0:
+                color = "#2ECC71"  # Green - Good
+            elif m1_loss_rate < 5.0:
+                color = "#F39C12"  # Orange - Fair
+            else:
+                color = "#E74C3C"  # Red - Poor
+            self.m1_loss_label.setStyleSheet(f"color: {color}; font-size: 16pt; font-weight: bold;")
+
+        # Motor 2 packet loss
+        m2_total = self.motor2_packets_received + self.motor2_packets_lost
+        if m2_total > 0:
+            m2_loss_rate = (self.motor2_packets_lost / m2_total) * 100
+            self.m2_loss_label.setText(f"{m2_loss_rate:.2f}%")
+            if hasattr(self, 'm2_packets_label'):
+                self.m2_packets_label.setText(f"({self.motor2_packets_lost}/{m2_total})")
+
+            # Color code based on loss rate
+            if m2_loss_rate < 1.0:
+                color = "#2ECC71"  # Green - Good
+            elif m2_loss_rate < 5.0:
+                color = "#F39C12"  # Orange - Fair
+            else:
+                color = "#E74C3C"  # Red - Poor
+            self.m2_loss_label.setStyleSheet(f"color: {color}; font-size: 16pt; font-weight: bold;")
+
+    def _update_latency_display(self):
+        """Update latency statistics display"""
+        if not self.test_running or len(self.latency_history) == 0:
+            return
+
+        # Check if UI elements exist
+        if not hasattr(self, 'latency_label'):
+            return
+
+        # Current RTT
+        self.latency_label.setText(f"{self.current_rtt:.1f} ms")
+
+        # Statistics
+        avg_rtt = sum(self.latency_history) / len(self.latency_history)
+        min_rtt = min(self.latency_history)
+        max_rtt = max(self.latency_history)
+
+        if hasattr(self, 'latency_avg_label'):
+            self.latency_avg_label.setText(f"Avg: {avg_rtt:.1f} ms")
+        if hasattr(self, 'latency_minmax_label'):
+            self.latency_minmax_label.setText(f"Min: {min_rtt:.1f} ms  Max: {max_rtt:.1f} ms")
+
+        # Color code based on latency
+        if self.current_rtt < 50:
+            color = "#2ECC71"  # Green - Excellent
+        elif self.current_rtt < 100:
+            color = "#F39C12"  # Orange - Fair
+        else:
+            color = "#E74C3C"  # Red - Poor
+        self.latency_label.setStyleSheet(f"color: {color}; font-size: 16pt; font-weight: bold;")
 
     # ========== IMU Window ==========
     def _toggle_imu_window(self):
@@ -952,9 +1588,109 @@ class ExoPulseGUI(QMainWindow):
         """Handle TCP connection"""
         self.tcp_sock = sock
         self._log(f"✓ TCP connected to {ESP32_IP}:{ESP32_PORT}")
+
+        # Send MODE_WIFI command to switch ESP32 to WiFi output
+        try:
+            self.tcp_sock.send(b"MODE_WIFI\n")
+            self._log("→ Sent MODE_WIFI command to ESP32")
+            import time
+            time.sleep(0.2)
+        except Exception as e:
+            self._log(f"⚠ Failed to send MODE_WIFI: {e}")
+
         # Auto-calibrate after connection
         if self.motor_mode == "can":
             threading.Thread(target=self._auto_calibrate, daemon=True).start()
+        # Start TCP listener for receiving data
+        self._start_tcp_listener()
+
+    def _start_tcp_listener(self):
+        """Start TCP listener to receive data from ESP32"""
+        def listener():
+            import re
+            try:
+                self.data_queue.put(("log", f"✓ TCP listener started"))
+
+                while not self.stop_udp_evt.is_set() and self.tcp_sock:
+                    try:
+                        # Set timeout for non-blocking receive
+                        self.tcp_sock.settimeout(0.1)
+                        data = self.tcp_sock.recv(4096).decode('utf-8', errors='ignore')
+
+                        if data:
+                            # Put motor data into queue for normal processing
+                            lines = data.split('\n')
+                            for line in lines:
+                                line = line.strip()
+                                if line:
+                                    # Put regular data into queue
+                                    msg = f"[TCP] {line}"
+                                    self.data_queue.put(("data", msg))
+
+                                    # Parse PONG responses for latency measurement
+                                    if self.test_running:
+                                        pong_match = re.search(r'\[PONG\]\s+seq:(\d+)\s+ts_req:(\d+)\s+ts_reply:(\d+)', line)
+                                        if pong_match:
+                                            seq = int(pong_match.group(1))
+
+                                            # Calculate RTT using PC-side recorded send time
+                                            if seq in self.ping_sent_times:
+                                                sent_time_ms = self.ping_sent_times[seq]
+                                                current_time_ms = int(time.time() * 1000)
+                                                rtt = current_time_ms - sent_time_ms
+
+                                                self.current_rtt = rtt
+                                                self.latency_history.append(rtt)
+
+                                                # Update latency display
+                                                self._update_latency_display()
+
+                                        # Parse motor data with SEQ field for packet loss tracking
+                                        motor_match = re.search(r'\[(\d+)\]\s+SEQ:(\d+)\s+M:(\d+)', line)
+                                        if motor_match:
+                                            seq = int(motor_match.group(2))
+                                            motor_id = int(motor_match.group(3))
+
+                                            if motor_id == 1:
+                                                self.motor1_packets_received += 1
+                                                if self.last_motor1_seq is not None:
+                                                    expected_seq = (self.last_motor1_seq + 1) % (2**32)
+                                                    if seq != expected_seq:
+                                                        if seq > expected_seq:
+                                                            lost = seq - expected_seq
+                                                        else:
+                                                            lost = (2**32 - expected_seq) + seq
+                                                        self.motor1_packets_lost += lost
+                                                self.last_motor1_seq = seq
+
+                                            elif motor_id == 2:
+                                                self.motor2_packets_received += 1
+                                                if self.last_motor2_seq is not None:
+                                                    expected_seq = (self.last_motor2_seq + 1) % (2**32)
+                                                    if seq != expected_seq:
+                                                        if seq > expected_seq:
+                                                            lost = seq - expected_seq
+                                                        else:
+                                                            lost = (2**32 - expected_seq) + seq
+                                                        self.motor2_packets_lost += lost
+                                                self.last_motor2_seq = seq
+
+                                            # Update packet loss display
+                                            self._update_packet_loss_display()
+
+                    except socket.timeout:
+                        continue
+                    except Exception as e:
+                        if self.tcp_sock:
+                            self.data_queue.put(("log", f"⚠ TCP recv error: {e}"))
+                        break
+
+            except Exception as e:
+                self.data_queue.put(("log", f"⚠ TCP listener error: {e}"))
+            finally:
+                self.data_queue.put(("log", "✗ TCP listener stopped"))
+
+        threading.Thread(target=listener, daemon=True).start()
 
     def _start_udp_listener(self):
         """Start UDP listener"""

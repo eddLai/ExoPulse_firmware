@@ -472,7 +472,7 @@ class WiFiSignalMonitor(QMainWindow):
                     stop:0 #EC7063, stop:1 #E74C3C);
             }
         """)
-        self.close_btn.clicked.connect(self.close)
+        self.close_btn.clicked.connect(self._on_close)
         button_layout.addWidget(self.close_btn)
 
         layout.addLayout(button_layout)
@@ -1158,6 +1158,21 @@ class WiFiSignalMonitor(QMainWindow):
         self.config_log.verticalScrollBar().setValue(
             self.config_log.verticalScrollBar().maximum()
         )
+
+    def _on_close(self):
+        """Handle close button click - save WiFi state if connected"""
+        # If connected to ESP32, save IP to temp file for main GUI to switch to WiFi mode
+        if self.connected and self.esp32_ip:
+            try:
+                temp_file = "/tmp/exopulse_wifi_switch.txt"
+                with open(temp_file, "w") as f:
+                    f.write(f"{self.esp32_ip}:{self.esp32_port}\n")
+                print(f"[✓] Saved WiFi config to {temp_file}")
+            except Exception as e:
+                print(f"[!] Warning: Failed to save WiFi config: {e}")
+
+        # Close the window
+        self.close()
 
     def closeEvent(self, event):
         """Handle window close event"""
