@@ -1,0 +1,3 @@
+[submodule "EMG/uMyo_v3_1_pcb"]
+	path = EMG/uMyo_v3_1_pcb
+	url = https://github.com/ultimaterobotics/uMyo_v3_1_pcb.git
