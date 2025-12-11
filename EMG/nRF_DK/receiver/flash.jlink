@@ -1,0 +1,5 @@
+r
+loadfile build/nrf52840_dk_receiver.hex
+r
+g
+exit
