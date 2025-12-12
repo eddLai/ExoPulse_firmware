@@ -111,7 +111,7 @@ launch_emg_gui() {
     print_header "Launching EMG/uMyo GUI"
     activate_env "$PYTHON_ENV"
 
-    local gui_script="$SCRIPT_DIR/EMG/nRF_DK/receiver/umyo_plotter_gui.py"
+    local gui_script="$SCRIPT_DIR/EMG/umyo_plotter_gui.py"
     if [ -f "$gui_script" ]; then
         print_info "Starting umyo_plotter_gui.py..."
         python3 "$gui_script"
