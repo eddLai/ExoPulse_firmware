@@ -52,16 +52,24 @@ enum MotorErrorFlag : uint8_t {
     ERROR_OVER_TEMP         = 0x08,  // Bit 3: Over-temperature protection
 };
 
+// Motor data validity phase
+// Uninitialized means no CAN data has been received yet — field values are not real
+enum class MotorPhase : uint8_t {
+    Uninitialized,  // No data from motor — do not trust field values
+    Active,         // Valid data received from motor via CAN
+};
+
 // Motor status data structure
 struct MotorStatus {
-    uint8_t motorID;         // Motor ID (1 or 2)
-    int8_t temperature;      // °C
-    uint16_t voltage;        // 0.1V/LSB
-    uint8_t errorState;      // Error flags
-    int16_t torqueCurrent;   // iq: -2048~2048 → -33A~33A
-    int16_t speed;           // dps (degrees per second)
-    int32_t acceleration;    // dps/s (degrees per second squared) - INT32!
-    uint32_t encoder;        // 0~262143 (18-bit)
-    int64_t motorAngle;      // 0.01°/LSB (single-turn angle, 0-360°×gear_ratio)
-    uint32_t timestamp;      // millis() when read
+    uint8_t motorID         = 0;
+    MotorPhase phase        = MotorPhase::Uninitialized;
+    int8_t temperature      = 0;      // °C
+    uint16_t voltage        = 0;      // 0.1V/LSB
+    uint8_t errorState      = 0;      // Error flags
+    int16_t torqueCurrent   = 0;      // iq: -2048~2048 → -33A~33A
+    int16_t speed           = 0;      // dps (degrees per second)
+    int32_t acceleration    = 0;      // dps/s (degrees per second squared) - INT32!
+    uint32_t encoder        = 0;      // 0~262143 (18-bit)
+    int64_t motorAngle      = 0;      // 0.01°/LSB (single-turn angle, 0-360°×gear_ratio)
+    uint32_t timestamp      = 0;      // millis() when read
 };
