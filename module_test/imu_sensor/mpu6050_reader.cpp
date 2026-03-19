@@ -21,6 +21,8 @@
 #define MPU6050_ACCEL_XOUT_H   0x3B
 #define MPU6050_GYRO_XOUT_H    0x43
 #define MPU6050_TEMP_OUT_H     0x41
+#define MPU6050_SIGNAL_PATH_RESET 0x68
+#define MPU6050_USER_CTRL      0x6A
 
 // Configuration values
 #define MPU6050_DEVICE_ID      0x68
@@ -35,6 +37,8 @@ class MPU6050 {
 private:
     int i2c_fd;
     uint8_t i2c_addr;
+    float gx_offset, gy_offset, gz_offset;
+    float ax_offset, ay_offset, az_offset;
 
     bool writeByte(uint8_t reg, uint8_t value) {
         uint8_t buffer[2] = {reg, value};
@@ -61,7 +65,9 @@ private:
     }
 
 public:
-    MPU6050(const char* device, uint8_t addr) {
+    MPU6050(const char* device, uint8_t addr)
+        : gx_offset(0), gy_offset(0), gz_offset(0),
+          ax_offset(0), ay_offset(0), az_offset(0) {
         i2c_addr = addr;
         i2c_fd = open(device, O_RDWR);
         if (i2c_fd < 0) {
@@ -96,13 +102,12 @@ public:
 
         std::cout << "MPU6050 detected!" << std::endl;
 
-        // Wake up the MPU6050 (reset power management)
+        // Wake up the MPU6050 (clear sleep bit)
         if (!writeByte(MPU6050_PWR_MGMT_1, 0x00)) {
             std::cerr << "Failed to wake up MPU6050" << std::endl;
             return false;
         }
-
-        usleep(100000); // Wait 100ms for sensor to stabilize
+        usleep(100000);
 
         // Configure accelerometer (±2g)
         writeByte(MPU6050_ACCEL_CONFIG, 0x00);
@@ -110,7 +115,61 @@ public:
         // Configure gyroscope (±250°/s)
         writeByte(MPU6050_GYRO_CONFIG, 0x00);
 
+        usleep(50000);
+
+        // Gyro offset calibration: sample 200 readings while stationary
+        calibrate(200);
+
         return true;
+    }
+
+    void calibrate(int samples) {
+        std::cout << "Calibrating (keep sensor still)... " << std::flush;
+
+        double sum_gx = 0, sum_gy = 0, sum_gz = 0;
+        double sum_ax = 0, sum_ay = 0, sum_az = 0;
+        int valid = 0;
+
+        for (int i = 0; i < samples; i++) {
+            uint8_t buffer[14];
+            if (!readBytes(MPU6050_ACCEL_XOUT_H, 14, buffer)) continue;
+
+            int16_t ax_raw = (buffer[0] << 8) | buffer[1];
+            int16_t ay_raw = (buffer[2] << 8) | buffer[3];
+            int16_t az_raw = (buffer[4] << 8) | buffer[5];
+            int16_t gx_raw = (buffer[8] << 8) | buffer[9];
+            int16_t gy_raw = (buffer[10] << 8) | buffer[11];
+            int16_t gz_raw = (buffer[12] << 8) | buffer[13];
+
+            sum_ax += ax_raw / ACCEL_SCALE_2G;
+            sum_ay += ay_raw / ACCEL_SCALE_2G;
+            sum_az += az_raw / ACCEL_SCALE_2G;
+            sum_gx += gx_raw / GYRO_SCALE_250;
+            sum_gy += gy_raw / GYRO_SCALE_250;
+            sum_gz += gz_raw / GYRO_SCALE_250;
+            valid++;
+
+            usleep(10000); // 10ms between samples
+        }
+
+        if (valid > 0) {
+            // Gyro: offset = average (should be 0 at rest)
+            gx_offset = sum_gx / valid;
+            gy_offset = sum_gy / valid;
+            gz_offset = sum_gz / valid;
+
+            // Accel: offset = average - gravity component
+            // We don't know orientation, so just store raw average
+            // User can interpret calibrated accel relative to startup pose
+            ax_offset = sum_ax / valid;
+            ay_offset = sum_ay / valid;
+            az_offset = sum_az / valid;
+
+            std::cout << "done (" << valid << " samples)" << std::endl;
+            std::cout << "  Gyro offset:  X=" << std::fixed << std::setprecision(2)
+                      << gx_offset << " Y=" << gy_offset << " Z=" << gz_offset << " deg/s" << std::endl;
+            std::cout << "  Accel offset: X=" << ax_offset << " Y=" << ay_offset << " Z=" << az_offset << " g" << std::endl;
+        }
     }
 
     void readAccelGyro(float& ax, float& ay, float& az,
@@ -130,13 +189,13 @@ public:
         int16_t gy_raw = (buffer[10] << 8) | buffer[11];
         int16_t gz_raw = (buffer[12] << 8) | buffer[13];
 
-        // Convert to physical units
-        ax = ax_raw / ACCEL_SCALE_2G;
-        ay = ay_raw / ACCEL_SCALE_2G;
-        az = az_raw / ACCEL_SCALE_2G;
-        gx = gx_raw / GYRO_SCALE_250;
-        gy = gy_raw / GYRO_SCALE_250;
-        gz = gz_raw / GYRO_SCALE_250;
+        // Convert to physical units and subtract calibration offset
+        ax = ax_raw / ACCEL_SCALE_2G - ax_offset;
+        ay = ay_raw / ACCEL_SCALE_2G - ay_offset;
+        az = az_raw / ACCEL_SCALE_2G - az_offset;
+        gx = gx_raw / GYRO_SCALE_250 - gx_offset;
+        gy = gy_raw / GYRO_SCALE_250 - gy_offset;
+        gz = gz_raw / GYRO_SCALE_250 - gz_offset;
     }
 
     float readTemperature() {

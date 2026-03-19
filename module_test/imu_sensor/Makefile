@@ -1,9 +1,9 @@
-# Makefile for ADXL345 IMU Reader on Jetson Orin
+# Makefile for MPU6050 IMU Reader on Jetson Orin
 
 CXX = g++
 CXXFLAGS = -Wall -std=c++11
-TARGET = adxl345_reader
-SRC = adxl345_reader.cpp
+TARGET = mpu6050_reader
+SRC = mpu6050_reader.cpp
 
 all: $(TARGET)
 

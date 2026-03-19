@@ -50,6 +50,10 @@ except ImportError:
     serial = None
     list_ports = None
 
+# CAN Direct control via libexo_motor.so (MCP2515 SPI)
+import ctypes
+import os
+
 socket.setdefaulttimeout(2)
 
 ##############################################################################
@@ -60,6 +64,160 @@ ESP32_PORT = 8080
 UDP_PORT = 5000
 HEADER = bytes([0xAA, 0x55])
 BUF_SIZE = 1024
+
+##############################################################################
+# CAN Direct Backend (Jetson Orin → MCP2515 → LK-TECH Motor)
+##############################################################################
+class MotorStatus(ctypes.Structure):
+    """Matches motor_status_t in lktech_motor.h"""
+    _fields_ = [
+        ("temperature", ctypes.c_int8),
+        ("torque_current", ctypes.c_int16),
+        ("speed", ctypes.c_int16),
+        ("acceleration", ctypes.c_int32),
+        ("angle", ctypes.c_int64),
+        ("encoder", ctypes.c_uint32),
+        ("voltage", ctypes.c_uint16),
+        ("error_state", ctypes.c_uint8),
+    ]
+
+
+class CANDirectBackend:
+    """Direct CAN bus motor control via libexo_motor.so (no ESP32 needed)"""
+
+    # Find library relative to this file or in control/motor/
+    _LIB_SEARCH_PATHS = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "control", "motor", "libexo_motor.so"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "control", "motor", "libexo_motor.so"),
+        "/home/ntk/Documents/ExoPulse_firmware/control/motor/libexo_motor.so",
+    ]
+
+    def __init__(self, spi_device=b"/dev/spidev0.0", baud_rate=1000000):
+        self.spi_device = spi_device
+        self.baud_rate = baud_rate
+        self.lib = None
+        self.can = None
+        self.motors = {}  # {motor_id: handle}
+        self._connected = False
+
+    def connect(self, motor_ids=(0x141, 0x142)):
+        """Initialize CAN bus and connect to motors. Returns (success, message)."""
+        # Load shared library
+        lib_path = None
+        for path in self._LIB_SEARCH_PATHS:
+            if os.path.exists(path):
+                lib_path = path
+                break
+
+        if not lib_path:
+            return False, "libexo_motor.so not found. Run: cd control/motor && make"
+
+        try:
+            self.lib = ctypes.CDLL(lib_path)
+        except OSError as e:
+            return False, f"Failed to load library: {e}"
+
+        # Setup ctypes signatures
+        self.lib.mcp2515_create.restype = ctypes.c_void_p
+        self.lib.mcp2515_create.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
+        self.lib.mcp2515_init.restype = ctypes.c_int
+        self.lib.mcp2515_init.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        self.lib.mcp2515_destroy.argtypes = [ctypes.c_void_p]
+
+        self.lib.motor_create.restype = ctypes.c_void_p
+        self.lib.motor_create.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
+        self.lib.motor_init.restype = ctypes.c_int
+        self.lib.motor_init.argtypes = [ctypes.c_void_p]
+        self.lib.motor_set_torque.restype = ctypes.c_int
+        self.lib.motor_set_torque.argtypes = [ctypes.c_void_p, ctypes.c_int16, ctypes.POINTER(MotorStatus)]
+        self.lib.motor_read_status.restype = ctypes.c_int
+        self.lib.motor_read_status.argtypes = [ctypes.c_void_p, ctypes.POINTER(MotorStatus)]
+        self.lib.motor_stop.restype = ctypes.c_int
+        self.lib.motor_stop.argtypes = [ctypes.c_void_p]
+        self.lib.motor_shutdown.restype = ctypes.c_int
+        self.lib.motor_shutdown.argtypes = [ctypes.c_void_p]
+        self.lib.motor_destroy.argtypes = [ctypes.c_void_p]
+
+        # Initialize CAN bus
+        self.can = self.lib.mcp2515_create(self.spi_device, 1000000)
+        if not self.can:
+            return False, "Failed to create MCP2515 (check SPI device)"
+
+        if self.lib.mcp2515_init(self.can, self.baud_rate) < 0:
+            self.lib.mcp2515_destroy(self.can)
+            self.can = None
+            return False, "Failed to init MCP2515 (check SPI wiring)"
+
+        # Initialize motors
+        init_results = []
+        for mid in motor_ids:
+            handle = self.lib.motor_create(self.can, mid)
+            if not handle:
+                init_results.append(f"Motor 0x{mid:03X}: create failed")
+                continue
+            if self.lib.motor_init(handle) < 0:
+                self.lib.motor_destroy(handle)
+                init_results.append(f"Motor 0x{mid:03X}: no CAN response")
+                continue
+            # Map 0x141->1, 0x142->2
+            self.motors[mid - 0x140] = handle
+            init_results.append(f"Motor 0x{mid:03X}: OK")
+
+        if not self.motors:
+            self.lib.mcp2515_destroy(self.can)
+            self.can = None
+            return False, "No motors responded. " + "; ".join(init_results)
+
+        self._connected = True
+        return True, "; ".join(init_results)
+
+    def read_status(self, motor_id):
+        """Read motor status. Returns (success, MotorStatus or None)."""
+        handle = self.motors.get(motor_id)
+        if not handle:
+            return False, None
+        status = MotorStatus()
+        if self.lib.motor_read_status(handle, ctypes.byref(status)) == 0:
+            return True, status
+        return False, None
+
+    def set_torque(self, motor_id, iq):
+        """Set motor torque. Returns (success, MotorStatus or None)."""
+        handle = self.motors.get(motor_id)
+        if not handle:
+            return False, None
+        status = MotorStatus()
+        if self.lib.motor_set_torque(handle, int(iq), ctypes.byref(status)) == 0:
+            return True, status
+        return False, None
+
+    def stop(self, motor_id):
+        """Stop a motor."""
+        handle = self.motors.get(motor_id)
+        if not handle:
+            return False
+        return self.lib.motor_stop(handle) == 0
+
+    def stop_all(self):
+        """Stop all motors."""
+        for mid in list(self.motors.keys()):
+            self.stop(mid)
+
+    def shutdown(self):
+        """Shutdown all motors and cleanup."""
+        for mid, handle in list(self.motors.items()):
+            self.lib.motor_stop(handle)
+            self.lib.motor_destroy(handle)
+        self.motors.clear()
+        if self.can:
+            self.lib.mcp2515_destroy(self.can)
+            self.can = None
+        self._connected = False
+
+    @property
+    def connected(self):
+        return self._connected
+
 
 ##############################################################################
 # Protocol Helpers
@@ -963,6 +1121,9 @@ class ExoPulseGUI(QMainWindow):
         # Runtime attributes
         self.ser = None
         self.tcp_sock = None
+        self.can_backend = None  # CANDirectBackend instance
+        self.can_read_thread = None
+        self.stop_can_evt = threading.Event()
         self.recording = False
         self.in_demo = False
         self.log_lines = []
@@ -1487,6 +1648,27 @@ class ExoPulseGUI(QMainWindow):
         self.btn_wifi_config.clicked.connect(self._launch_wifi_config)
         comm_layout.addWidget(self.btn_wifi_config)
 
+        # CAN Direct connect button (Jetson Orin MCP2515, no ESP32)
+        self.btn_can_direct = QPushButton("CAN Direct (MCP2515)")
+        self.btn_can_direct.setMinimumHeight(35)
+        self.btn_can_direct.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #E67E22, stop:1 #D35400);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #F39C12, stop:1 #E67E22);
+            }
+        """)
+        self.btn_can_direct.clicked.connect(self._toggle_can_direct)
+        comm_layout.addWidget(self.btn_can_direct)
+
         comm_group.setLayout(comm_layout)
         scroll_layout.addWidget(comm_group)
 
@@ -1848,6 +2030,20 @@ class ExoPulseGUI(QMainWindow):
             self.packets_received[2] = 0
         elif motor_id == 0:
             self.packets_received = {1: 0, 2: 0}
+
+        # CAN Direct mode: read current angle as zero reference (local reset)
+        if self.current_mode == "can_direct":
+            if self.can_backend and self.can_backend.connected:
+                ids = [motor_id] if motor_id in [1, 2] else [1, 2]
+                for mid in ids:
+                    ok, status = self.can_backend.read_status(mid)
+                    if ok:
+                        self._log(f"✓ Motor {mid} calibrated (angle={status.angle * 0.01:.2f}°)")
+                    else:
+                        self._log(f"⚠ Motor {mid} calibration read failed")
+            else:
+                self._log("⚠ CAN not connected")
+            return
 
         # 嘗試發送校準命令到 ESP32
         try:
@@ -2394,6 +2590,150 @@ class ExoPulseGUI(QMainWindow):
 
         threading.Thread(target=listener, daemon=True).start()
 
+    # ========== CAN Direct Mode (MCP2515 SPI) ==========
+    def _toggle_can_direct(self):
+        """Toggle CAN Direct connection on/off"""
+        if self.can_backend and self.can_backend.connected:
+            self._disconnect_can_direct()
+        else:
+            self._connect_can_direct()
+
+    def _connect_can_direct(self):
+        """Connect via CAN Direct (MCP2515 SPI)"""
+        self._log("[CAN] Connecting to MCP2515...")
+
+        # Stop UART if running
+        self.stop_uart_evt.set()
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+            self.ser = None
+
+        self.can_backend = CANDirectBackend()
+        ok, msg = self.can_backend.connect()
+
+        if ok:
+            self.current_mode = "can_direct"
+            self.connection_status = "Connected"
+            self.comm_status_label.setText("CAN Direct")
+            self.comm_status_label.setStyleSheet("""
+                QLabel {
+                    background-color: #E67E22;
+                    color: white;
+                    padding: 5px 10px;
+                    border-radius: 3px;
+                    font-weight: bold;
+                }
+            """)
+            self.comm_info_label.setText(f"MCP2515 SPI | 1Mbps")
+            self.btn_can_direct.setText("Disconnect CAN")
+            self.btn_can_direct.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #C0392B, stop:1 #E74C3C);
+                    color: white;
+                    border: none;
+                    border-radius: 5px;
+                    font-weight: bold;
+                    font-size: 10pt;
+                }
+                QPushButton:hover {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #E74C3C, stop:1 #C0392B);
+                }
+            """)
+            self._log(f"[CAN] Connected: {msg}")
+
+            # Start CAN read thread
+            self._start_can_read_thread()
+        else:
+            self._log(f"[CAN] Connection failed: {msg}")
+            self.can_backend = None
+
+    def _disconnect_can_direct(self):
+        """Disconnect CAN Direct"""
+        self.stop_can_evt.set()
+        if self.can_read_thread:
+            self.can_read_thread.join(timeout=2.0)
+            self.can_read_thread = None
+        if self.can_backend:
+            self.can_backend.shutdown()
+            self.can_backend = None
+
+        self.current_mode = "uart"
+        self.connection_status = "Disconnected"
+        self.comm_status_label.setText("UART")
+        self.comm_status_label.setStyleSheet("""
+            QLabel {
+                background-color: #2C3E50;
+                color: #ECF0F1;
+                padding: 5px 10px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+        """)
+        self.comm_info_label.setText("--")
+        self.btn_can_direct.setText("CAN Direct (MCP2515)")
+        self.btn_can_direct.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #E67E22, stop:1 #D35400);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 10pt;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #F39C12, stop:1 #E67E22);
+            }
+        """)
+        self._log("[CAN] Disconnected")
+
+        # Restart UART
+        self.stop_uart_evt.clear()
+        self._start_uart_listener()
+
+    def _start_can_read_thread(self):
+        """Start background thread that polls motor status via CAN"""
+        self.stop_can_evt.clear()
+
+        def reader():
+            poll_interval = 0.02  # 50Hz polling
+            while not self.stop_can_evt.is_set():
+                if not self.can_backend or not self.can_backend.connected:
+                    break
+
+                for motor_id in [1, 2]:
+                    ok, status = self.can_backend.read_status(motor_id)
+                    if ok:
+                        # Format as the same text format that _parse_motor_line expects
+                        ts = int(time.time() * 1000) & 0xFFFFFFFF
+                        angle_deg = status.angle * 0.01
+                        current_a = status.torque_current * (33.0 / 2048.0)
+                        voltage_v = status.voltage * 0.1
+                        line = (
+                            f"[{ts}] M:{motor_id} "
+                            f"T:{status.temperature} "
+                            f"V:{voltage_v:.1f} "
+                            f"I:{current_a:.2f} "
+                            f"S:{status.speed} "
+                            f"ACC:{status.acceleration} "
+                            f"E:{status.encoder} "
+                            f"A:{angle_deg:.2f} "
+                            f"ERR:0x{status.error_state:02x}"
+                        )
+                        self.data_queue.put(("data", f"[CAN] {line}"))
+
+                time.sleep(poll_interval)
+
+        self.can_read_thread = threading.Thread(target=reader, daemon=True)
+        self.can_read_thread.start()
+        self._log("[CAN] Status read thread started (50Hz)")
+
     def _start_uart_listener(self):
         """Start UART listener"""
         if serial is None:
@@ -2477,7 +2817,7 @@ class ExoPulseGUI(QMainWindow):
             return None
 
         # Remove prefix like [UART], [WiFi], [TCP], [IMU] if present
-        line = re.sub(r'^\[(UART|WiFi|TCP|IMU)[^\]]*\]\s*', '', line)
+        line = re.sub(r'^\[(UART|WiFi|TCP|IMU|CAN)[^\]]*\]\s*', '', line)
 
         try:
             # Try new format with SEQ field first: [timestamp] SEQ:xxx M:x T:xx ...
@@ -2611,7 +2951,10 @@ class ExoPulseGUI(QMainWindow):
         """Send packet"""
         mode_str = f"[{self.motor_mode.upper()}]"
 
-        if self.current_mode == "wifi":
+        if self.current_mode == "can_direct":
+            self._log(f"→ [CAN] {desc} (packet commands not supported in CAN Direct mode)")
+            return
+        elif self.current_mode == "wifi":
             if not self.tcp_sock:
                 self._log("⚠ TCP not connected")
                 return
@@ -2632,16 +2975,28 @@ class ExoPulseGUI(QMainWindow):
 
     def _send_motor_angle_cmd(self, motor_id: int, angle: float, log: bool = True):
         """
-        Send direct motor angle command using M1/M2 serial protocol.
-
-        Args:
-            motor_id: 1 or 2
-            angle: Target angle in degrees (can be negative)
-            log: Whether to log the command
+        Send direct motor angle command.
+        - CAN Direct mode: sends torque command via MCP2515
+        - UART/WiFi mode: sends M1/M2 text command via ESP32
         """
         if motor_id not in [1, 2]:
             self._log(f"⚠ Invalid motor_id: {motor_id}")
             return False
+
+        # CAN Direct mode: use torque control (angle->torque needs PID, for now use as iq value)
+        if self.current_mode == "can_direct":
+            if not self.can_backend or not self.can_backend.connected:
+                if log:
+                    self._log("⚠ CAN not connected")
+                return False
+            # Treat angle value as torque iq for CAN Direct mode
+            iq = int(max(-800, min(800, angle)))
+            ok, status = self.can_backend.set_torque(motor_id, iq)
+            if ok and log:
+                self._log(f"→ [CAN] M{motor_id} torque iq={iq}")
+            elif not ok and log:
+                self._log(f"⚠ [CAN] M{motor_id} torque failed")
+            return ok
 
         cmd = f"M{motor_id}:{angle:.2f}\n"
         cmd_bytes = cmd.encode('utf-8')
@@ -2682,6 +3037,13 @@ class ExoPulseGUI(QMainWindow):
 
     def _send_stop_cmd(self):
         """Send STOP command to stop all motors"""
+        # CAN Direct mode
+        if self.current_mode == "can_direct":
+            if self.can_backend and self.can_backend.connected:
+                self.can_backend.stop_all()
+                self._log("→ [CAN] STOP all motors")
+            return
+
         cmd = "STOP\n"
         cmd_bytes = cmd.encode('utf-8')
 
@@ -3026,6 +3388,14 @@ class ExoPulseGUI(QMainWindow):
             self.timer.stop()
             self.stop_udp_evt.set()
             self.stop_uart_evt.set()
+            self.stop_can_evt.set()
+
+            # Shutdown CAN Direct backend
+            if self.can_backend and self.can_backend.connected:
+                try:
+                    self.can_backend.shutdown()
+                except:
+                    pass
 
             if self.tcp_sock:
                 try:

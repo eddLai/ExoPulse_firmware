@@ -228,9 +228,196 @@ Check PlatformIO configuration in [platformio.ini](platformio.ini).
   - Enhanced GUI with auto-reconnect
 - **Previous**: RMD motor development (see `RMD_motor_legacy/`)
 
+## Modular HAL (`sensing/` + `control/`)
+
+Modular hardware abstraction layer for Jetson Orin, designed for future FPGA migration.
+Each module uses a unified `create/init/read(or write)/destroy` pattern with C-linkage for Python ctypes compatibility.
+
+### Architecture
+
+```
+ExoPulse_firmware/
+├── sensing/                    # Sensor modules
+│   ├── imu/                    # MPU6050 6-axis IMU (I2C)
+│   │   ├── mpu6050.h/.cpp     # libexo_imu.so
+│   │   └── test_mpu6050.cpp
+│   ├── emg/                    # BLE EMG 4-channel (BLE)
+│   │   ├── emg_interface.py    # Abstract base class
+│   │   ├── ble_emg_module.py   # BLE implementation
+│   │   └── test_emg.py
+│   └── README.md               # Sensing API reference
+├── control/                    # Actuator modules
+│   ├── motor/                  # LK-TECH motor via MCP2515 CAN (SPI)
+│   │   ├── mcp2515.h/.cpp     # CAN controller driver
+│   │   ├── lktech_motor.h/.cpp # Motor protocol
+│   │   ├── Makefile            # libexo_motor.so
+│   │   └── test_motor.cpp
+│   └── README.md               # Control API reference
+└── module_test/                # Original standalone tests (reference)
+```
+
+### Hardware Topology
+
+```
+Jetson Orin I2C (bus 7) ──> MPU6050 (6-axis IMU)
+Jetson Orin SPI ──> MCP2515 ──> CAN Bus ──> MGv2 Motor x2 (0x141, 0x142)
+Jetson Orin BLE ──> EMG2ch_B x2 (4-channel EMG)
+```
+
+### Quick Build
+
+```bash
+make -C sensing/imu      # -> libexo_imu.so + test_mpu6050
+make -C control/motor     # -> libexo_motor.so + test_motor
+# EMG is pure Python: python3 sensing/emg/test_emg.py
+```
+
+### depRL Integration API
+
+This section documents the API contract for the `depRL` reinforcement learning framework.
+depRL code is **not modified** — this serves as a handoff specification.
+
+#### Sensor API Summary
+
+| Module | Language | Init | Read | Output |
+|--------|----------|------|------|--------|
+| IMU | C (.so) | `mpu6050_create` + `mpu6050_init` | `mpu6050_read` | `imu_data_t`: accel[3], gyro[3], temp, timestamp |
+| EMG | Python | `BLEEMGModule().init()` | `.read()` | `np.ndarray(4,)`: raw ADC [ABE_T2, ABE_T4, ABB_T2, ABB_T4] |
+| Motor | C (.so) | `motor_create` + `motor_init` | `motor_read_status` | `motor_status_t`: temp, iq, speed, accel, angle, encoder |
+
+#### depRL Observation Vector Mapping
+
+Based on `external_input_config_e6b_4emg_imu.txt` (15-dim external input):
+
+| Indices | Source | Description |
+|---------|--------|-------------|
+| 54, 58, 63, 67 | EMG `read()` | Thigh EMG: hamstrings_r, rect_fem_r, hamstrings_l, rect_fem_l |
+| 72, 73, 74, 75 | IMU `accel/gyro` | Trunk IMU orientation quaternion (qw, qx, qy, qz) |
+| 76, 77, 78 | IMU `gyro` | Trunk IMU angular velocity (x, y, z) |
+| 121, 123 | Motor `read_status` | hip_exo_l_pos, hip_exo_l_vel |
+| 122, 124 | Motor `read_status` | hip_exo_r_pos, hip_exo_r_vel |
+
+#### depRL Action Mapping
+
+Based on `scone_wrapper.py` (external_scale=45.0):
+
+| Action Index | Target | Mapping |
+|-------------|--------|---------|
+| action[18] | Motor 0x141 (right hip) | `iq = clamp(action * 45.0, -800, 800)` then `motor_set_torque(motor1, iq)` |
+| action[19] | Motor 0x142 (left hip) | `iq = clamp(action * 45.0, -800, 800)` then `motor_set_torque(motor2, iq)` |
+
+#### Python ctypes Integration Example
+
+```python
+import ctypes
+import numpy as np
+from sensing.emg.ble_emg_module import BLEEMGModule
+
+# --- Load shared libraries ---
+imu_lib = ctypes.CDLL("sensing/imu/libexo_imu.so")
+motor_lib = ctypes.CDLL("control/motor/libexo_motor.so")
+
+# --- C structures ---
+class ImuData(ctypes.Structure):
+    _fields_ = [
+        ("accel", ctypes.c_float * 3),
+        ("gyro", ctypes.c_float * 3),
+        ("temperature", ctypes.c_float),
+        ("timestamp", ctypes.c_double),
+    ]
+
+class MotorStatus(ctypes.Structure):
+    _fields_ = [
+        ("temperature", ctypes.c_int8),
+        ("torque_current", ctypes.c_int16),
+        ("speed", ctypes.c_int16),
+        ("acceleration", ctypes.c_int32),
+        ("angle", ctypes.c_int64),
+        ("encoder", ctypes.c_uint32),
+        ("voltage", ctypes.c_uint16),
+        ("error_state", ctypes.c_uint8),
+    ]
+
+# --- Setup function signatures ---
+# IMU
+imu_lib.mpu6050_create.restype = ctypes.c_void_p
+imu_lib.mpu6050_create.argtypes = [ctypes.c_char_p, ctypes.c_uint8]
+imu_lib.mpu6050_init.restype = ctypes.c_int
+imu_lib.mpu6050_init.argtypes = [ctypes.c_void_p]
+imu_lib.mpu6050_read.restype = ctypes.c_int
+imu_lib.mpu6050_read.argtypes = [ctypes.c_void_p, ctypes.POINTER(ImuData)]
+imu_lib.mpu6050_destroy.argtypes = [ctypes.c_void_p]
+
+# MCP2515
+motor_lib.mcp2515_create.restype = ctypes.c_void_p
+motor_lib.mcp2515_create.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
+motor_lib.mcp2515_init.restype = ctypes.c_int
+motor_lib.mcp2515_init.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+motor_lib.mcp2515_destroy.argtypes = [ctypes.c_void_p]
+
+# Motor
+motor_lib.motor_create.restype = ctypes.c_void_p
+motor_lib.motor_create.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
+motor_lib.motor_init.restype = ctypes.c_int
+motor_lib.motor_init.argtypes = [ctypes.c_void_p]
+motor_lib.motor_set_torque.restype = ctypes.c_int
+motor_lib.motor_set_torque.argtypes = [ctypes.c_void_p, ctypes.c_int16, ctypes.POINTER(MotorStatus)]
+motor_lib.motor_read_status.restype = ctypes.c_int
+motor_lib.motor_read_status.argtypes = [ctypes.c_void_p, ctypes.POINTER(MotorStatus)]
+motor_lib.motor_stop.restype = ctypes.c_int
+motor_lib.motor_stop.argtypes = [ctypes.c_void_p]
+motor_lib.motor_destroy.argtypes = [ctypes.c_void_p]
+
+# --- Initialize all hardware ---
+imu = imu_lib.mpu6050_create(b"/dev/i2c-7", 0x68)
+imu_lib.mpu6050_init(imu)
+
+can = motor_lib.mcp2515_create(b"/dev/spidev0.0", 1000000)
+motor_lib.mcp2515_init(can, 1000000)
+
+motor1 = motor_lib.motor_create(can, 0x141)
+motor2 = motor_lib.motor_create(can, 0x142)
+motor_lib.motor_init(motor1)
+motor_lib.motor_init(motor2)
+
+emg = BLEEMGModule()
+emg.init()
+
+# --- Read loop ---
+imu_data = ImuData()
+motor_status = MotorStatus()
+
+imu_lib.mpu6050_read(imu, ctypes.byref(imu_data))
+emg_data = emg.read()  # np.ndarray(4,)
+motor_lib.motor_read_status(motor1, ctypes.byref(motor_status))
+
+# --- Send torque ---
+EXTERNAL_SCALE = 45.0
+IQ_LIMIT = 800
+
+def apply_action(action_18, action_19):
+    iq1 = int(max(-IQ_LIMIT, min(IQ_LIMIT, action_18 * EXTERNAL_SCALE)))
+    iq2 = int(max(-IQ_LIMIT, min(IQ_LIMIT, action_19 * EXTERNAL_SCALE)))
+    motor_lib.motor_set_torque(motor1, iq1, None)
+    motor_lib.motor_set_torque(motor2, iq2, None)
+
+# --- Cleanup ---
+motor_lib.motor_stop(motor1)
+motor_lib.motor_stop(motor2)
+motor_lib.motor_destroy(motor1)
+motor_lib.motor_destroy(motor2)
+motor_lib.mcp2515_destroy(can)
+imu_lib.mpu6050_destroy(imu)
+emg.close()
+```
+
+See [sensing/README.md](sensing/README.md) and [control/README.md](control/README.md) for detailed API documentation.
+
+---
+
 ## Related Modules
 
-- **[MGv2/](MGv2/)** - MGv2 motor control firmware and documentation
+- **[MGv2/](MGv2/)** - MGv2 motor control firmware and documentation (ESP32, original)
 - **[EMG/](EMG/)** - EMG signal acquisition using ADS1256 ADC (24-bit, 8-channel)
 - **[RMD_motor_legacy/](RMD_motor_legacy/)** - Archived RMD motor control code
 
