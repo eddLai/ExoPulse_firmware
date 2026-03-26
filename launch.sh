@@ -104,7 +104,7 @@ launch_main_gui() {
     activate_env "$PYTHON_ENV"
 
     print_info "Starting gui.py..."
-    python3 "$SCRIPT_DIR/gui.py"
+    python3 "$SCRIPT_DIR/scripts/gui.py"
 }
 
 launch_emg_gui() {

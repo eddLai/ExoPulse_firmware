@@ -1,0 +1,240 @@
+"""
+Motor Controller - Control strategy layer with built-in safety protection.
+
+Safety checks are enforced in the base class update() wrapper so that
+ALL controller subclasses are protected, even when called directly
+(bypassing MotorAPI).
+
+Safety enforced on every update():
+  1. Input clamping (before sending): iq ≤ ±max_iq, angle ≤ ±max_angle
+  2. Response checking (after receiving): temperature, error_state, current
+  3. Emergency stop: auto-stops motor and blocks further commands until reset()
+"""
+from __future__ import annotations
+
+import time
+from abc import ABC, abstractmethod
+
+from motor_types import MotorResponse, SafetyConfig
+from motor_transport import MotorTransport
+
+
+class MotorController(ABC):
+    """Base controller with safety protection.
+
+    Subclasses implement _execute() for their control logic.
+    The public update() method wraps _execute() with safety checks.
+    """
+
+    def __init__(self, transport: MotorTransport, motor_id: int,
+                 safety: SafetyConfig = None):
+        self.transport = transport
+        self.motor_id = motor_id
+        self.safety = safety or SafetyConfig()
+        self._stopped = False
+
+    def update(self, target_value: float) -> MotorResponse:
+        """Send one control command with safety protection.
+
+        Args:
+            target_value: iq for torque controllers, degrees for position.
+
+        Returns:
+            MotorResponse (may contain error_msg from safety checks).
+        """
+        # 1. Clamp input to safe range
+        target_value = self._clamp_input(target_value)
+
+        # 2. Reject if safety-stopped
+        if self._stopped:
+            return MotorResponse.fail(
+                self.motor_id,
+                "SAFETY_STOPPED: call reset() to resume")
+
+        # 3. Execute subclass control logic
+        response = self._execute(target_value)
+
+        # 4. Check response safety
+        return self._check_response_safety(response)
+
+    @abstractmethod
+    def _execute(self, target_value: float) -> MotorResponse:
+        """Subclass control logic. Called by update() after input clamping."""
+
+    def stop(self) -> MotorResponse:
+        """Stop the motor."""
+        return self.transport.send_stop(self.motor_id)
+
+    def read_status(self) -> MotorResponse:
+        """Read motor status (convenience method)."""
+        return self.transport.read_status(self.motor_id)
+
+    @property
+    @abstractmethod
+    def control_mode(self) -> str:
+        """Return 'torque', 'position', or 'pid_position'."""
+
+    # ---- Safety internals ----
+
+    def _clamp_input(self, value: float) -> float:
+        """Clamp input based on control mode."""
+        if self.control_mode == "torque":
+            return max(-self.safety.max_iq, min(self.safety.max_iq, value))
+        elif self.control_mode in ("position", "pid_position"):
+            return max(-self.safety.max_angle, min(self.safety.max_angle, value))
+        return value
+
+    def _check_response_safety(self, response: MotorResponse) -> MotorResponse:
+        """Check motor feedback for unsafe conditions."""
+        if not response.success:
+            return response
+
+        # Over-temperature → emergency stop
+        if response.temperature > self.safety.max_temperature:
+            self._emergency_stop()
+            response.error_msg = (
+                f"OVER_TEMP: {response.temperature}°C "
+                f"> {self.safety.max_temperature}°C")
+            return response
+
+        # Error state → emergency stop
+        if response.error_state != 0 and self.safety.error_auto_stop:
+            self._emergency_stop()
+            response.error_msg = f"ERROR_STATE: 0x{response.error_state:02X}"
+            return response
+
+        # Over-current → warning (no stop)
+        if (response.torque_current != 0.0
+                and abs(response.torque_current) > self.safety.max_current):
+            response.error_msg = (
+                f"HIGH_CURRENT: {response.torque_current:.1f}A "
+                f"> {self.safety.max_current}A")
+
+        # Low voltage → warning (no stop)
+        if (response.voltage > 0
+                and response.voltage < self.safety.low_voltage_threshold):
+            msg = (f"LOW_VOLTAGE: {response.voltage:.1f}V "
+                   f"< {self.safety.low_voltage_threshold}V")
+            response.error_msg = (
+                f"{response.error_msg}; {msg}" if response.error_msg else msg)
+
+        return response
+
+    def _emergency_stop(self):
+        """Stop motor and block further commands."""
+        self._stopped = True
+        try:
+            self.transport.send_stop(self.motor_id)
+        except Exception:
+            pass  # Best-effort stop
+
+    def reset(self):
+        """Clear safety stop, allowing commands again."""
+        self._stopped = False
+
+
+class DirectTorqueController(MotorController):
+    """Direct torque control — lowest latency, straight to transport.
+
+    Safety: iq clamped to ±max_iq (default 400) before sending.
+    """
+
+    def _execute(self, iq: float) -> MotorResponse:
+        return self.transport.send_torque(self.motor_id, int(iq))
+
+    @property
+    def control_mode(self) -> str:
+        return "torque"
+
+
+class DirectPositionController(MotorController):
+    """Direct position control — uses motor's built-in PID (0xA4 command).
+
+    Safety: angle clamped to ±max_angle (default ±45°) before sending.
+    Requires transport that supports 'position' command.
+    """
+
+    def __init__(self, transport: MotorTransport, motor_id: int,
+                 max_speed: int = 700, safety: SafetyConfig = None):
+        super().__init__(transport, motor_id, safety)
+        self.max_speed = max_speed
+
+    def _execute(self, angle_deg: float) -> MotorResponse:
+        if "position" not in self.transport.supported_commands:
+            return MotorResponse.fail(
+                self.motor_id,
+                f"{self.transport.transport_name} does not support position control")
+        return self.transport.send_position(
+            self.motor_id, angle_deg, self.max_speed)
+
+    @property
+    def control_mode(self) -> str:
+        return "position"
+
+
+class PIDPositionController(MotorController):
+    """Python-side PID position control — for transports without native position.
+
+    Reads current angle via read_status(), computes PID error, sends torque.
+
+    Safety:
+      - Target angle clamped to ±max_angle (default ±45°)
+      - PID output iq clamped to ±max_iq (default 400)
+      - Temperature/error checks by base class
+    """
+
+    def __init__(self, transport: MotorTransport, motor_id: int,
+                 kp: float = 5.0, ki: float = 0.1, kd: float = 0.5,
+                 safety: SafetyConfig = None):
+        super().__init__(transport, motor_id, safety)
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self._integral = 0.0
+        self._prev_error = 0.0
+        self._prev_time: float = 0.0
+
+    def _execute(self, target_deg: float) -> MotorResponse:
+        # 1. Read current angle
+        status = self.transport.read_status(self.motor_id)
+        if not status.success:
+            return status
+
+        # 2. PID computation
+        error = target_deg - status.angle
+        now = time.monotonic()
+        dt = now - self._prev_time if self._prev_time > 0 else 0.02
+        dt = max(dt, 0.001)  # Prevent division by zero
+
+        self._integral += error * dt
+        # Anti-windup: clamp integral
+        max_integral = self.safety.max_iq / max(self.ki, 0.001)
+        self._integral = max(-max_integral, min(max_integral, self._integral))
+
+        derivative = (error - self._prev_error) / dt
+
+        iq = self.kp * error + self.ki * self._integral + self.kd * derivative
+        iq = max(-self.safety.max_iq, min(self.safety.max_iq, int(iq)))
+
+        # 3. Send torque command
+        result = self.transport.send_torque(self.motor_id, iq)
+
+        # 4. Update state
+        self._prev_error = error
+        self._prev_time = now
+        return result
+
+    def reset_pid(self):
+        """Reset PID internal state (integral, derivative, timer)."""
+        self._integral = 0.0
+        self._prev_error = 0.0
+        self._prev_time = 0.0
+
+    def reset(self):
+        """Clear safety stop AND reset PID state."""
+        super().reset()
+        self.reset_pid()
+
+    @property
+    def control_mode(self) -> str:
+        return "pid_position"

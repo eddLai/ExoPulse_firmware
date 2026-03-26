@@ -49,5 +49,15 @@ Thumbs.db
 *.temp
 *.log
 
+# Compiled binaries (build with make)
+control/motor/test_motor
+control/motor/libexo_motor.so
+sensing/imu/test_mpu6050
+sensing/imu/libexo_imu.so
+tests/hardware/canbus_module/mcp2515_canbus
+tests/hardware/imu_sensor/adxl345_reader
+tests/hardware/imu_sensor/mpu6050_reader
+tests/hardware/imu_sensor/spi_scan
+
 # Test datasets
 test/offline_dataset/

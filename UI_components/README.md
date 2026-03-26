@@ -1,4 +1,9 @@
-# UI Components
+# UI Components (Legacy)
+
+> **Note:** These standalone UI tools have been integrated into ExoPulse `local_UI`.
+> Use `local_UI/experiment_menu.py` for the unified interface with motor control,
+> IMU visualization, and real-time data plotting.
+> These files are kept for reference and standalone debugging use.
 
 This directory contains all user interface components for the ExoPulse firmware, organized by complexity level.
 
