@@ -23,6 +23,7 @@ Usage:
 """
 from __future__ import annotations
 
+import math
 from typing import Dict, Optional, Type
 
 from motor_types import MotorResponse, SafetyConfig
@@ -33,6 +34,8 @@ from motor_controller import (
     DirectPositionController,
     PIDPositionController,
 )
+
+_DEG2RAD = math.pi / 180.0
 
 
 class MotorAPI:
@@ -61,6 +64,7 @@ class MotorAPI:
         for motor_id, ctrl in list(self._controllers.items()):
             ctrl_class = type(ctrl)
             kwargs = {}
+            old_offset = None
             if isinstance(ctrl, DirectPositionController):
                 kwargs['max_speed'] = ctrl.max_speed
                 old_offset = ctrl.zero_offset
@@ -68,9 +72,10 @@ class MotorAPI:
                 kwargs['kp'] = ctrl.kp
                 kwargs['ki'] = ctrl.ki
                 kwargs['kd'] = ctrl.kd
+                old_offset = ctrl.zero_offset
             new_ctrl = ctrl_class(
                 transport, motor_id, safety=self._safety, **kwargs)
-            if isinstance(ctrl, DirectPositionController):
+            if old_offset is not None and hasattr(new_ctrl, 'zero_offset'):
                 new_ctrl.zero_offset = old_offset
             self._controllers[motor_id] = new_ctrl
 
@@ -133,8 +138,50 @@ class MotorAPI:
                       "does not support position")
 
     def read_status(self, motor_id: int) -> MotorResponse:
-        """Read motor status."""
+        """Read motor status (raw absolute multi-turn angle in degrees)."""
         return self._transport.read_status(motor_id)
+
+    def read_status_relative(self, motor_id: int) -> MotorResponse:
+        """Read motor status with angle relative to calibrated zero offset.
+
+        If the motor has a position controller with a zero offset, the
+        returned angle is ``absolute_angle - zero_offset`` so that the
+        calibrated position reads 0°.  Speed and other fields are unchanged.
+
+        Falls back to raw read_status() when no offset is available.
+        """
+        resp = self._transport.read_status(motor_id)
+        if resp.success:
+            offset = self._get_zero_offset(motor_id)
+            resp.angle = resp.angle - offset
+        return resp
+
+    def read_status_rad(self, motor_id: int) -> MotorResponse:
+        """Read motor status with angle/speed in radians (for SCONE / RL).
+
+        Returns a MotorResponse where:
+          - angle: radians, relative to zero offset
+          - speed: rad/s
+          - acceleration: rad/s²
+        """
+        resp = self._transport.read_status(motor_id)
+        if resp.success:
+            offset = self._get_zero_offset(motor_id)
+            resp.angle = (resp.angle - offset) * _DEG2RAD
+            resp.speed = resp.speed * _DEG2RAD
+            resp.acceleration = resp.acceleration * _DEG2RAD
+        return resp
+
+    def get_zero_offset(self, motor_id: int) -> float:
+        """Return the zero offset (degrees) for a motor, or 0.0 if none."""
+        return self._get_zero_offset(motor_id)
+
+    def _get_zero_offset(self, motor_id: int) -> float:
+        """Internal: retrieve zero offset from position controller."""
+        ctrl = self._controllers.get(motor_id)
+        if ctrl and hasattr(ctrl, 'zero_offset'):
+            return ctrl.zero_offset
+        return 0.0
 
     def stop(self, motor_id: int) -> MotorResponse:
         """Stop a single motor."""
@@ -153,7 +200,7 @@ class MotorAPI:
     def calibrate(self, motor_id: int) -> MotorResponse:
         """Calibrate a motor's zero offset (current angle becomes 0°).
 
-        Only applies to DirectPositionController.
+        Works with DirectPositionController and PIDPositionController.
         Returns the status response from reading the motor.
         """
         ctrl = self._controllers.get(motor_id)

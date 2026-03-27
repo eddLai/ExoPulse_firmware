@@ -201,9 +201,11 @@ class PIDPositionController(MotorController):
     """Python-side PID position control — for transports without native position.
 
     Reads current angle via read_status(), computes PID error, sends torque.
+    Target angle is relative to calibrated zero offset (same as
+    DirectPositionController).
 
     Safety:
-      - Target angle clamped to ±max_angle (default ±45°)
+      - Target angle clamped to ±max_angle (default ±45°) relative to zero offset
       - PID output iq clamped to ±max_iq (default 400)
       - Temperature/error checks by base class
     """
@@ -215,9 +217,30 @@ class PIDPositionController(MotorController):
         self.kp = kp
         self.ki = ki
         self.kd = kd
+        self._zero_offset = 0.0  # motor absolute angle treated as user 0°
         self._integral = 0.0
         self._prev_error = 0.0
         self._prev_time: float = 0.0
+
+    def calibrate(self) -> MotorResponse:
+        """Read current motor angle and set it as zero offset.
+
+        After calibration, user angle 0° maps to the motor's current position.
+        Safety clamp ±max_angle becomes relative to this position.
+        """
+        resp = self.transport.read_status(self.motor_id)
+        if resp.success:
+            self._zero_offset = resp.angle
+            self.reset_pid()
+        return resp
+
+    @property
+    def zero_offset(self) -> float:
+        return self._zero_offset
+
+    @zero_offset.setter
+    def zero_offset(self, value: float):
+        self._zero_offset = value
 
     def _execute(self, target_deg: float) -> MotorResponse:
         # 1. Read current angle
@@ -225,8 +248,10 @@ class PIDPositionController(MotorController):
         if not status.success:
             return status
 
-        # 2. PID computation
-        error = target_deg - status.angle
+        # 2. PID computation — error in absolute space
+        # target_deg is already clamped to ±max_angle by base class
+        absolute_target = self._zero_offset + target_deg
+        error = absolute_target - status.angle
         now = time.monotonic()
         dt = now - self._prev_time if self._prev_time > 0 else 0.02
         dt = max(dt, 0.001)  # Prevent division by zero
