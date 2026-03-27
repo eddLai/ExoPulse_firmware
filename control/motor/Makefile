@@ -5,16 +5,17 @@ LDFLAGS = -shared
 LIB     = libexo_motor.so
 TEST    = test_motor
 
-SRCS    = mcp2515.cpp lktech_motor.cpp motor_protection.cpp
+SRCS    = mcp2515.cpp lktech_motor.cpp
+HDRS    = mcp2515.h lktech_motor.h
 
 .PHONY: all clean test
 
 all: $(LIB) $(TEST)
 
-$(LIB): $(SRCS) mcp2515.h lktech_motor.h motor_protection.h
+$(LIB): $(SRCS) $(HDRS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SRCS) -lm
 
-$(TEST): test_motor.cpp $(SRCS) mcp2515.h lktech_motor.h motor_protection.h
+$(TEST): test_motor.cpp $(SRCS) $(HDRS)
 	$(CC) $(CFLAGS) -o $@ test_motor.cpp $(SRCS) -lrt -lm
 
 clean:

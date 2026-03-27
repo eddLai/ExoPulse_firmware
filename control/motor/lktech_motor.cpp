@@ -21,6 +21,7 @@
 #define CMD_READ_STATUS_2        0x9C
 #define CMD_READ_MULTI_ANGLE     0x92
 #define CMD_TORQUE_CLOSED_LOOP   0xA1
+#define CMD_POSITION_MULTI_2     0xA4
 
 /* Safety limit: iq +/-800 (~12.8A) */
 #define TORQUE_IQ_LIMIT 800
@@ -132,6 +133,36 @@ int motor_set_torque(lktech_motor_t* dev, int16_t iq, motor_status_t* status_out
         (uint8_t)(iq & 0xFF),
         (uint8_t)((iq >> 8) & 0xFF),
         0x00, 0x00
+    };
+
+    uint8_t rx[8];
+    if (send_and_recv(dev, tx, rx) < 0) {
+        return -1;
+    }
+
+    if (status_out) {
+        memset(status_out, 0, sizeof(motor_status_t));
+        parse_control_response(rx, status_out);
+    }
+
+    return 0;
+}
+
+int motor_set_position(lktech_motor_t* dev, int32_t angle_001deg,
+                       uint16_t max_speed, motor_status_t* status_out) {
+    if (!dev) return -1;
+
+    /* Build 0xA4 command (matches MGv2 sendPositionControl_A4):
+     * [0xA4] [0x00] [maxSpeed_L] [maxSpeed_H] [angle_L] [angle_ML] [angle_MH] [angle_H] */
+    uint8_t tx[8] = {
+        CMD_POSITION_MULTI_2,
+        0x00,
+        (uint8_t)(max_speed & 0xFF),
+        (uint8_t)((max_speed >> 8) & 0xFF),
+        (uint8_t)(angle_001deg & 0xFF),
+        (uint8_t)((angle_001deg >> 8) & 0xFF),
+        (uint8_t)((angle_001deg >> 16) & 0xFF),
+        (uint8_t)((angle_001deg >> 24) & 0xFF)
     };
 
     uint8_t rx[8];

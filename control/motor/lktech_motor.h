@@ -63,6 +63,17 @@ int motor_set_torque(lktech_motor_t* dev, int16_t iq, motor_status_t* status_out
 int motor_read_status(lktech_motor_t* dev, motor_status_t* out);
 
 /*
+ * Position closed-loop control, multi-turn (command 0xA4).
+ * Matches MGv2 sendPositionControl_A4 protocol.
+ * angle_001deg: target angle in 0.01 deg units (int32_t), e.g. 36000 = 360°
+ * max_speed: maximum speed in dps (uint16_t), 0 = no limit.
+ * status_out: optional, filled with motor response. Pass NULL to ignore.
+ * Returns 0 on success, -1 on failure.
+ */
+int motor_set_position(lktech_motor_t* dev, int32_t angle_001deg,
+                       uint16_t max_speed, motor_status_t* status_out);
+
+/*
  * Stop motor (command 0x81). Motor stays enabled but stops moving.
  * Returns 0 on success, -1 on failure.
  */
