@@ -86,41 +86,71 @@ See [UI_components/README.md](UI_components/README.md) for detailed UI documenta
 ## Project Structure
 
 ```
-ExoPulse_firmware/
-├── gui.py                          # Unified GUI launcher with sidebar (entry point)
-├── src/ -> MGv2/src/               # Symlink to firmware source
-├── MGv2/                           # MGv2 motor driver firmware
-│   ├── src/
-│   │   ├── main.cpp                # ESP32 firmware (MGv2 motors)
-│   │   ├── main.h                  # Header file
-│   │   ├── main_wifi.cpp           # WiFi mode firmware
-│   │   └── main_wifi_motor.cpp     # WiFi motor control
-│   ├── test/                       # Test programs
-│   ├── README.md                   # MGv2 documentation
-│   └── 20230220145958f_datasheet_protocol.pdf
-├── UI_components/                  # User interface components
-│   ├── motor_control.py            # [Low-level] Basic motor control GUI
-│   ├── motor_monitor.py            # [High-level] Advanced monitoring GUI
-│   ├── dual_motor_plotter.py       # [High-level] Real-time dual motor plotter
-│   ├── wifi_monitor.py             # [High-level] WiFi-based monitor
-│   ├── wifi_dual_motor_plotter.py  # [High-level] WiFi dual motor plotter
-│   ├── can_plotter.py              # [High-level] CAN bus data plotter
-│   ├── emg_plotter.py              # [High-level] EMG signal plotter
-│   ├── serial_reader.py            # [Low-level] Simple serial reader
-│   └── README.md                   # UI components documentation
-├── EMG/                            # EMG signal acquisition module
-│   ├── src/ADS.cpp                 # ADS1256 ADC driver
-│   ├── lib/ADS1256/                # ADS1256 library
-│   └── README.md                   # EMG module documentation
-├── RMD_motor_legacy/               # Legacy RMD motor code (archived)
-│   └── README.md                   # Legacy documentation
-├── docs/                           # Additional documentation
-│   └── MGv2/                       # MGv2-specific docs
-├── include/                        # Shared header files
-│   └── CAN_commands.h              # CAN protocol definitions
-├── QUICK_START_WIFI.md             # WiFi mode quick start
-├── WIFI_MOTOR_GUIDE.md             # WiFi motor control guide
-└── platformio.ini                  # PlatformIO configuration
+firmware_layer/
+├── launch.sh                       # Unified launcher (flash, GUI, etc.)
+├── platformio.ini                  # PlatformIO config (ESP32 build)
+├── requirements.txt                # Python dependencies
+│
+├── control/                        # Jetson Orin HAL - Motor
+│   ├── motor/                      #   C library: MCP2515 + LK-TECH motor
+│   │   ├── lktech_motor.h/cpp      #   Motor API (torque, status, stop)
+│   │   ├── mcp2515.h/cpp           #   SPI-CAN driver
+│   │   ├── Makefile                 #   Build → libexo_motor.so
+│   │   └── test_motor.cpp           #   Standalone test
+│   └── README.md
+│
+├── sensing/                        # Jetson Orin HAL - Sensors
+│   ├── imu/                        #   MPU6050 via I2C
+│   │   ├── mpu6050.h/cpp           #   IMU API (accel, gyro, quaternion)
+│   │   ├── Makefile                 #   Build → libexo_imu.so
+│   │   └── test_mpu6050.cpp         #   Standalone test
+│   ├── emg/                        #   BLE EMG (EMG2ch_B)
+│   │   ├── emg_interface.py         #   ABC
+│   │   ├── ble_emg_module.py        #   BLE implementation
+│   │   └── emg_filter.py            #   Signal processing pipeline
+│   └── README.md
+│
+├── UI_components/                  # Python API & UI layer
+│   ├── motor_types.py               # MotorResponse, SafetyConfig
+│   ├── motor_transport.py           # MotorTransport ABC
+│   ├── motor_controller.py          # Controllers + safety protection
+│   ├── motor_api.py                 # Unified motor API
+│   ├── transports/                  # Motor transport backends
+│   │   ├── can_direct.py            #   MCP2515 SPI direct
+│   │   ├── serial_esp32.py          #   UART → ESP32
+│   │   └── wifi_esp32.py            #   TCP → ESP32
+│   ├── sensor_types.py              # IMUData, SensorReading
+│   ├── sensor_transport.py          # SensorTransport ABC
+│   ├── sensor_api.py                # Unified sensor API
+│   ├── sensors/                     # Sensor transport backends
+│   │   ├── imu_i2c.py               #   I2C direct (libexo_imu.so)
+│   │   └── imu_serial.py            #   ESP32 UDP stream
+│   ├── motor_control.py             # Legacy GUI (ExoPulseGUI, 3400+ lines)
+│   ├── motor_serial_control.py      # CLI: position control via ESP32
+│   ├── torque_serial_control.py     # CLI: torque control via ESP32
+│   ├── tools/                       # Utility scripts
+│   │   ├── auto_wifi_setup.py       #   WiFi configuration
+│   │   ├── serial_plotter.py        #   CAN data visualization
+│   │   └── emg_plotter.py           #   EMG signal viewer
+│   └── tests/                       # UI integration tests
+│
+├── MGv2/                           # ESP32 firmware (CAN bridge)
+│   ├── src/main.cpp                 #   FreeRTOS main (dual-core)
+│   ├── include/                     #   Production headers
+│   │   ├── motor_control.h          #   CAN motor protocol (0xA1/A4/A6)
+│   │   ├── serial_commands.h        #   UART command parser
+│   │   └── wifi_pairing.h           #   WiFi STA + TCP server
+│   └── test/                        #   Test programs + test headers
+│
+├── EMG/                            # EMG hardware (uMyo, ADS1256, nRF)
+├── docs/                           # Reference documentation
+├── tests/hardware/                 # Hardware reference tests
+│   ├── canbus_module/               #   MCP2515 standalone test
+│   ├── imu_sensor/                  #   IMU reader tests
+│   └── ble_emg/                     #   BLE EMG receiver test
+├── scripts/                        # Standalone scripts
+├── pinout/                         # Hardware pinout diagrams
+└── RMD_motor_legacy/               # Archived RMD motor code
 ```
 
 ## User Interface Components

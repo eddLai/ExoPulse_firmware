@@ -99,6 +99,7 @@ class CANDirectBackend:
         self.can = None
         self.motors = {}  # {motor_id: handle}
         self._connected = False
+        self._can_lock = threading.RLock()  # Protects all CAN bus SPI access
 
     def connect(self, motor_ids=(0x141, 0x142)):
         """Initialize CAN bus and connect to motors. Returns (success, message)."""
@@ -172,46 +173,55 @@ class CANDirectBackend:
         return True, "; ".join(init_results)
 
     def read_status(self, motor_id):
-        """Read motor status. Returns (success, MotorStatus or None)."""
+        """Read motor status. Returns (success, MotorStatus or None).
+        Thread-safe: protected by _can_lock to prevent SPI bus contention."""
         handle = self.motors.get(motor_id)
         if not handle:
             return False, None
         status = MotorStatus()
-        if self.lib.motor_read_status(handle, ctypes.byref(status)) == 0:
-            return True, status
+        with self._can_lock:
+            if self.lib.motor_read_status(handle, ctypes.byref(status)) == 0:
+                return True, status
         return False, None
 
     def set_torque(self, motor_id, iq):
-        """Set motor torque. Returns (success, MotorStatus or None)."""
+        """Set motor torque. Returns (success, MotorStatus or None).
+        Thread-safe: protected by _can_lock to prevent SPI bus contention."""
         handle = self.motors.get(motor_id)
         if not handle:
             return False, None
         status = MotorStatus()
-        if self.lib.motor_set_torque(handle, int(iq), ctypes.byref(status)) == 0:
-            return True, status
+        with self._can_lock:
+            if self.lib.motor_set_torque(handle, int(iq), ctypes.byref(status)) == 0:
+                return True, status
         return False, None
 
     def stop(self, motor_id):
-        """Stop a motor."""
+        """Stop a motor. Thread-safe."""
         handle = self.motors.get(motor_id)
         if not handle:
             return False
-        return self.lib.motor_stop(handle) == 0
+        with self._can_lock:
+            return self.lib.motor_stop(handle) == 0
 
     def stop_all(self):
-        """Stop all motors."""
-        for mid in list(self.motors.keys()):
-            self.stop(mid)
+        """Stop all motors. Thread-safe."""
+        with self._can_lock:
+            for mid in list(self.motors.keys()):
+                handle = self.motors.get(mid)
+                if handle:
+                    self.lib.motor_stop(handle)
 
     def shutdown(self):
-        """Shutdown all motors and cleanup."""
-        for mid, handle in list(self.motors.items()):
-            self.lib.motor_stop(handle)
-            self.lib.motor_destroy(handle)
-        self.motors.clear()
-        if self.can:
-            self.lib.mcp2515_destroy(self.can)
-            self.can = None
+        """Shutdown all motors and cleanup. Thread-safe."""
+        with self._can_lock:
+            for mid, handle in list(self.motors.items()):
+                self.lib.motor_stop(handle)
+                self.lib.motor_destroy(handle)
+            self.motors.clear()
+            if self.can:
+                self.lib.mcp2515_destroy(self.can)
+                self.can = None
         self._connected = False
 
     @property
