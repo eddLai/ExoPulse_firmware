@@ -202,7 +202,28 @@ MPU6050 not found. Expected 0x68 or 0x72, got 0x0
 Failed to open SPI device: /dev/spidev0.0
 ```
 
-**解決方法：** 確保 SPI 已啟用（參見上方「啟用 SPI」步驟）
+**原因：** SPI 控制器已啟用，但 `spidev` 內核驅動模組未加載，導致 `/dev/spidev*` 設備節點不存在。
+
+**解決方法：**
+
+```bash
+# 加載 spidev 模組
+sudo modprobe spidev
+
+# 或使用 insmod（如果 modprobe 失敗）
+sudo insmod /lib/modules/$(uname -r)/kernel/drivers/spi/spidev.ko
+
+# 驗證設備已建立
+ls -la /dev/spidev*
+```
+
+**詳細 Debug 步驟：** 參見 `../canbus_moudle/README.md` 的「Failed to open SPI device」章節
+
+**永久解決（開機自動加載）：**
+
+```bash
+echo "spidev" | sudo tee /etc/modules-load.d/spidev.conf
+```
 
 #### 錯誤：找不到 ADXL345
 
@@ -210,12 +231,30 @@ Failed to open SPI device: /dev/spidev0.0
 ADXL345 not found. Expected 0xe5, got 0x0
 ```
 
-**檢查：**
-1. 驗證所有接線連接正確
-2. 確認 ADXL345 有接 3.3V 電源
-3. 檢查 GND 連接
-4. 使用三用電表確認電源電壓
-5. GY-291 模組預設為 I2C 模式，需要特殊設定才能使用 SPI
+**檢查順序：**
+
+1. **先確認 SPI 設備已建立**
+   ```bash
+   ls -la /dev/spidev*
+   # 如果沒有，參見上方「無法開啟 SPI 設備」的解決方法
+   ```
+
+2. **驗證硬體接線**
+   - 確認所有接線連接正確（特別是 CS/MOSI/MISO/SCK）
+   - 確認 ADXL345 有接 3.3V 電源（不要接 5V！）
+   - 檢查 GND 連接
+   - 使用三用電表確認電源電壓
+
+3. **檢查 GY-291 模組模式**
+   - GY-291 模組預設為 **I2C 模式**
+   - 需要特殊設定或焊接才能切換到 SPI 模式
+   - 如果是預設 I2C 模式的模組，改用 I2C 接線或更換支持 SPI 的模組
+
+4. **測試 SPI 通訊**
+   ```bash
+   # 執行 spi_scan 工具測試
+   ./spi_scan
+   ```
 
 ## 參考資料
 

@@ -1,0 +1,41 @@
+# ExoPulse AI Agent Configuration
+# This file is loaded by realtime_controller.py
+
+# Path to depRL checkpoint directory (required)
+checkpoint_path: ""
+
+# Control loop frequency (Hz)
+control_freq_hz: 50
+
+# Action -> torque scaling factor
+external_scale: 45.0
+
+# Torque current safety clamp (max ±800 ~ 12.8A)
+iq_limit: 800
+
+# Observation / action dimensions (must match training checkpoint)
+obs_dim: 125
+action_dim: 20
+
+# Hardware sensors
+enable_imu: true
+enable_emg: false
+enable_motor: true
+
+# Smoothing filter: "ema" or "butterworth"
+filter_type: "ema"
+ema_alpha: 0.3
+butterworth_cutoff: 5.0
+
+# Safety — Motor protection
+watchdog_timeout_ms: 200
+max_consecutive_errors: 5
+torque_ramp_seconds: 2.0
+max_motor_freq_hz: 10.0    # CAN command rate ceiling (Hz)
+
+# Safety — Human protection (placeholder, not yet active)
+# max_torque_rate_nms: 50.0
+# biomechanical_limits_enabled: false
+
+# Use noisy_test_step (exploration) vs test_step (deterministic)
+noisy: false
