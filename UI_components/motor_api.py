@@ -63,12 +63,16 @@ class MotorAPI:
             kwargs = {}
             if isinstance(ctrl, DirectPositionController):
                 kwargs['max_speed'] = ctrl.max_speed
+                old_offset = ctrl.zero_offset
             elif isinstance(ctrl, PIDPositionController):
                 kwargs['kp'] = ctrl.kp
                 kwargs['ki'] = ctrl.ki
                 kwargs['kd'] = ctrl.kd
-            self._controllers[motor_id] = ctrl_class(
+            new_ctrl = ctrl_class(
                 transport, motor_id, safety=self._safety, **kwargs)
+            if isinstance(ctrl, DirectPositionController):
+                new_ctrl.zero_offset = old_offset
+            self._controllers[motor_id] = new_ctrl
 
     @property
     def connected(self) -> bool:
@@ -145,6 +149,18 @@ class MotorAPI:
             self.stop(motor_id)
         # Also stop via transport in case there are unmanaged motors
         self._transport.send_stop(0)
+
+    def calibrate(self, motor_id: int) -> MotorResponse:
+        """Calibrate a motor's zero offset (current angle becomes 0°).
+
+        Only applies to DirectPositionController.
+        Returns the status response from reading the motor.
+        """
+        ctrl = self._controllers.get(motor_id)
+        if ctrl and hasattr(ctrl, 'calibrate'):
+            return ctrl.calibrate()
+        # Fallback: just read status
+        return self._transport.read_status(motor_id)
 
     def reset(self, motor_id: int):
         """Reset safety stop for a motor's controller."""

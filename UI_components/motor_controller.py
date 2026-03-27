@@ -150,7 +150,9 @@ class DirectTorqueController(MotorController):
 class DirectPositionController(MotorController):
     """Direct position control — uses motor's built-in PID (0xA4 command).
 
-    Safety: angle clamped to ±max_angle (default ±45°) before sending.
+    Safety: angle clamped to ±max_angle (default ±45°) relative to zero offset.
+    The zero offset is set by calibrate() to the motor's current angle,
+    so ±max_angle becomes a safe range around the startup position.
     Requires transport that supports 'position' command.
     """
 
@@ -158,14 +160,37 @@ class DirectPositionController(MotorController):
                  max_speed: int = 700, safety: SafetyConfig = None):
         super().__init__(transport, motor_id, safety)
         self.max_speed = max_speed
+        self._zero_offset = 0.0  # motor absolute angle treated as user 0°
+
+    def calibrate(self) -> MotorResponse:
+        """Read current motor angle and set it as zero offset.
+
+        After calibration, user angle 0° maps to the motor's current position.
+        Safety clamp ±max_angle becomes relative to this position.
+        """
+        resp = self.transport.read_status(self.motor_id)
+        if resp.success:
+            self._zero_offset = resp.angle
+        return resp
+
+    @property
+    def zero_offset(self) -> float:
+        return self._zero_offset
+
+    @zero_offset.setter
+    def zero_offset(self, value: float):
+        self._zero_offset = value
 
     def _execute(self, angle_deg: float) -> MotorResponse:
         if "position" not in self.transport.supported_commands:
             return MotorResponse.fail(
                 self.motor_id,
                 f"{self.transport.transport_name} does not support position control")
+        # angle_deg is already clamped to ±max_angle by base class
+        # Add zero offset so the command is relative to calibrated position
+        absolute_angle = self._zero_offset + angle_deg
         return self.transport.send_position(
-            self.motor_id, angle_deg, self.max_speed)
+            self.motor_id, absolute_angle, self.max_speed)
 
     @property
     def control_mode(self) -> str:
