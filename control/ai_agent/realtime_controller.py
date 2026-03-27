@@ -25,13 +25,15 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-# Ensure depRL is importable
+# Ensure depRL and firmware_layer are importable
 _DEPRL_ROOT = Path(__file__).resolve().parents[3]  # -> Documents/
 _DEPRL_PATH = _DEPRL_ROOT / "depRL"
-if str(_DEPRL_PATH) not in sys.path:
-    sys.path.insert(0, str(_DEPRL_PATH))
+_FW_PATH = _DEPRL_ROOT / "firmware_layer" / "UI_components"
+for _p in (_DEPRL_PATH, _FW_PATH):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
-from deprl.env_wrappers.hardware_bridge import HardwareBridge
+from hardware_bridge import HardwareBridge
 from deprl.env_wrappers.scone_wrapper import RealtimeSmoothingFilter, ButterworthFilter
 
 logger = logging.getLogger("ai_agent")
