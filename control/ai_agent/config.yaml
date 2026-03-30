@@ -14,8 +14,13 @@ external_scale: 45.0
 iq_limit: 800
 
 # Observation / action dimensions (must match training checkpoint)
+# Full SCONE obs/action space (HardwareEnv uses these for the bridge)
 obs_dim: 125
 action_dim: 20
+
+# External input config (defines which obs indices the agent actually sees)
+# HardwareWrapper extracts these from the 125-dim obs → 11-dim for IMU-only
+external_input_config: "external_input_config_simple_imu.txt"
 
 # Hardware sensors
 enable_imu: true

@@ -34,11 +34,10 @@ if str(_DEPRL_PATH) not in sys.path:
 from deprl.env_wrappers.scone_wrapper import RealtimeSmoothingFilter, ButterworthFilter
 
 try:
-    from deprl.env_wrappers.hardware_wrapper import HardwareEnv
+    from deprl.env_wrappers.hardware_wrapper import HardwareEnv, HardwareWrapper
 except ImportError:
-    # Fallback: add path manually
     sys.path.insert(0, str(_DEPRL_PATH))
-    from deprl.env_wrappers.hardware_wrapper import HardwareEnv
+    from deprl.env_wrappers.hardware_wrapper import HardwareEnv, HardwareWrapper
 
 logger = logging.getLogger("ai_agent")
 
@@ -232,6 +231,7 @@ class RealtimeControllerConfig:
     iq_limit: int = 800
     obs_dim: int = 125
     action_dim: int = 20
+    external_input_config: str = "external_input_config_simple_imu.txt"
     enable_imu: bool = True
     enable_emg: bool = False
     enable_motor: bool = True
@@ -321,12 +321,15 @@ class RealtimeController:
             self._set_state(ControllerState.ERROR)
             return False
 
-        # 1) Create HardwareEnv (manages HardwareBridge internally)
+        # 1) Create HardwareEnv → HardwareWrapper
+        #    HardwareEnv: 125-dim obs (bridge.inject), 20-dim action
+        #    HardwareWrapper: extracts external_indices → 11-dim obs for agent
         try:
-            logger.info("Creating HardwareEnv ...")
-            self._env = HardwareEnv(
+            logger.info("Creating HardwareEnv + HardwareWrapper ...")
+            base_env = HardwareEnv(
                 obs_dim=cfg.obs_dim,
                 action_dim=cfg.action_dim,
+                external_input_config_path=cfg.external_input_config,
                 hardware_config={
                     "enable_imu": cfg.enable_imu,
                     "enable_motor": cfg.enable_motor,
@@ -336,26 +339,32 @@ class RealtimeController:
                 external_scale=cfg.external_scale,
                 iq_limit=cfg.iq_limit,
             )
-            logger.info("HardwareEnv created")
+            # Wrap with HardwareWrapper (default mode: obs[external_indices] only)
+            self._env = HardwareWrapper(base_env)
+            ext_dim = len(self._env.external_indices)
+            logger.info("HardwareWrapper created (external_indices=%d dims)", ext_dim)
         except Exception as e:
             logger.error("Failed to create HardwareEnv: %s", e, exc_info=True)
             self._set_state(ControllerState.ERROR)
             return False
 
-        # 2) Load agent (HardwareEnv provides observation_space / action_space)
+        # 2) Load agent (HardwareWrapper provides correct observation_space)
         try:
             logger.info("Loading agent from %s ...", cfg.checkpoint_path)
             from deprl.utils.load_utils import load as deprl_load
 
             self._agent = deprl_load(cfg.checkpoint_path, self._env)
-            logger.info("Agent loaded successfully")
+            logger.info("Agent loaded (obs=%s, act=%s)",
+                        self._env.observation_space.shape,
+                        self._env.action_space.shape)
         except Exception as e:
             logger.error("Failed to load agent: %s", e, exc_info=True)
             self._set_state(ControllerState.ERROR)
             return False
 
         # 3) Setup safety pipeline
-        exo_indices = [18, 19]  # action indices for hip R/L
+        #    Agent outputs action_dim actions; exo channels are at indices 18, 19
+        exo_indices = [18, 19]  # action indices for hip R/L in the 20-dim action
 
         if cfg.filter_type == "butterworth":
             smoothing = ButterworthFilter(
