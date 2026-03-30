@@ -25,16 +25,20 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-# Ensure depRL and firmware_layer are importable
-_DEPRL_ROOT = Path(__file__).resolve().parents[3]  # -> Documents/
+# Ensure depRL is importable
+_DEPRL_ROOT = Path(__file__).resolve().parents[3]  # -> ExoPulse/
 _DEPRL_PATH = _DEPRL_ROOT / "depRL"
-_FW_PATH = _DEPRL_ROOT / "firmware_layer" / "UI_components"
-for _p in (_DEPRL_PATH, _FW_PATH):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+if str(_DEPRL_PATH) not in sys.path:
+    sys.path.insert(0, str(_DEPRL_PATH))
 
-from hardware_bridge import HardwareBridge
 from deprl.env_wrappers.scone_wrapper import RealtimeSmoothingFilter, ButterworthFilter
+
+try:
+    from deprl.env_wrappers.hardware_wrapper import HardwareEnv
+except ImportError:
+    # Fallback: add path manually
+    sys.path.insert(0, str(_DEPRL_PATH))
+    from deprl.env_wrappers.hardware_wrapper import HardwareEnv
 
 logger = logging.getLogger("ai_agent")
 
@@ -283,7 +287,7 @@ class RealtimeController:
         self.config = config
         self._state = ControllerState.IDLE
         self._agent = None
-        self._bridge = None
+        self._env: HardwareEnv | None = None
         self._safety: TorqueSafetyPipeline | None = None
         self._thread = None
         self._stop_event = threading.Event()
@@ -317,35 +321,36 @@ class RealtimeController:
             self._set_state(ControllerState.ERROR)
             return False
 
-        # 1) Load agent
+        # 1) Create HardwareEnv (manages HardwareBridge internally)
         try:
-            logger.info("Loading agent from %s ...", cfg.checkpoint_path)
-            from control.ai_agent.dummy_env import DummyExoEnv
-            from deprl.utils.load_utils import load as deprl_load
-
-            dummy = DummyExoEnv(obs_dim=cfg.obs_dim, action_dim=cfg.action_dim)
-            self._agent = deprl_load(cfg.checkpoint_path, dummy)
-            logger.info("Agent loaded successfully")
+            logger.info("Creating HardwareEnv ...")
+            self._env = HardwareEnv(
+                obs_dim=cfg.obs_dim,
+                action_dim=cfg.action_dim,
+                hardware_config={
+                    "enable_imu": cfg.enable_imu,
+                    "enable_motor": cfg.enable_motor,
+                    "enable_emg": cfg.enable_emg,
+                },
+                step_size=1.0 / cfg.control_freq_hz,
+                external_scale=cfg.external_scale,
+                iq_limit=cfg.iq_limit,
+            )
+            logger.info("HardwareEnv created")
         except Exception as e:
-            logger.error("Failed to load agent: %s", e, exc_info=True)
+            logger.error("Failed to create HardwareEnv: %s", e, exc_info=True)
             self._set_state(ControllerState.ERROR)
             return False
 
-        # 2) Initialize hardware bridge
+        # 2) Load agent (HardwareEnv provides observation_space / action_space)
         try:
-            logger.info("Initializing hardware bridge ...")
-            self._bridge = HardwareBridge({
-                "enable_imu": cfg.enable_imu,
-                "enable_motor": cfg.enable_motor,
-                "enable_emg": cfg.enable_emg,
-            })
-            if not self._bridge.init():
-                logger.error("HardwareBridge.init() returned False")
-                self._set_state(ControllerState.ERROR)
-                return False
-            logger.info("Hardware bridge initialized")
+            logger.info("Loading agent from %s ...", cfg.checkpoint_path)
+            from deprl.utils.load_utils import load as deprl_load
+
+            self._agent = deprl_load(cfg.checkpoint_path, self._env)
+            logger.info("Agent loaded successfully")
         except Exception as e:
-            logger.error("Failed to init hardware bridge: %s", e, exc_info=True)
+            logger.error("Failed to load agent: %s", e, exc_info=True)
             self._set_state(ControllerState.ERROR)
             return False
 
@@ -391,7 +396,7 @@ class RealtimeController:
             logger.warning("Cannot start from state %s", self._state)
             return
 
-        if self._agent is None or self._bridge is None:
+        if self._agent is None or self._env is None:
             logger.error("Must call initialize() before start()")
             return
 
@@ -416,7 +421,7 @@ class RealtimeController:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3.0)
 
-        # Send zero torque
+        # Send zero torque via env
         self._send_zero_torque()
         self._set_state(ControllerState.STOPPED)
         logger.info("Control loop stopped")
@@ -431,9 +436,9 @@ class RealtimeController:
     def shutdown(self):
         """Release all resources."""
         self.stop()
-        if self._bridge:
-            self._bridge.close()
-            self._bridge = None
+        if self._env:
+            self._env.close()
+            self._env = None
         self._agent = None
 
     def get_telemetry(self) -> dict:
@@ -465,17 +470,14 @@ class RealtimeController:
         start_time = time.monotonic()
         last_tick = start_time
 
+        # Initialize hardware and get first observation via env.reset()
+        obs = self._env.reset()
+
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
 
             try:
-                # 1) Construct observation
-                obs = np.zeros(cfg.obs_dim, dtype=np.float32)
-
-                # 2) Inject real sensor data
-                self._bridge.inject(obs)
-
-                # 3) Run RL inference
+                # 1) Run RL inference on current observation
                 t0 = time.monotonic()
                 if cfg.noisy:
                     action = self._agent.noisy_test_step(obs, steps=int(1e6))
@@ -484,31 +486,29 @@ class RealtimeController:
                 action = np.asarray(action, dtype=np.float32).flatten()
                 inference_ms = (time.monotonic() - t0) * 1000.0
 
-                # 4) Safety pipeline (clamp → filter → ramp → human protection)
+                # 2) Safety pipeline (clamp → filter → ramp → human protection)
                 elapsed = time.monotonic() - start_time
                 action = self._safety.apply(action, elapsed)
 
-                # 5) Accumulate into rate limiter; send if interval reached
+                # 3) Accumulate into rate limiter; send if interval reached
                 now = time.monotonic()
                 motor_action = self._safety.accumulate_and_maybe_send(action, now)
                 if motor_action is not None:
-                    self._bridge.apply_action(
-                        motor_action,
-                        external_scale=cfg.external_scale,
-                        iq_limit=cfg.iq_limit,
-                    )
+                    obs, _, _, _ = self._env.step(motor_action)
+                else:
+                    obs = self._env.observe()  # read-only sensor read
 
-                # 6) Compute actual loop rate
+                # 4) Compute actual loop rate
                 dt = now - last_tick
                 loop_hz = 1.0 / dt if dt > 0 else 0.0
                 last_tick = now
 
-                # 7) Compute torque values for telemetry (use last sent action)
+                # 5) Compute torque values for telemetry (use last sent action)
                 sent = self._safety.rate_limiter.last_sent_action
                 torque_r = float(np.clip(sent[18] * cfg.external_scale, -cfg.iq_limit, cfg.iq_limit))
                 torque_l = float(np.clip(sent[19] * cfg.external_scale, -cfg.iq_limit, cfg.iq_limit))
 
-                # 8) Update telemetry
+                # 6) Update telemetry
                 with self._lock:
                     self._telemetry = Telemetry(
                         timestamp=now,
@@ -549,11 +549,11 @@ class RealtimeController:
     # ── Helpers ──
 
     def _send_zero_torque(self):
-        """Send zero torque to all motors."""
-        if self._bridge and self._bridge._initialized:
+        """Send zero torque to all motors via HardwareEnv."""
+        if self._env and self._env._initialized:
             try:
                 zero_action = np.zeros(self.config.action_dim, dtype=np.float32)
-                self._bridge.apply_action(zero_action, external_scale=1.0, iq_limit=0)
+                self._env.step(zero_action)
             except Exception as e:
                 logger.error("Failed to send zero torque: %s", e)
 
