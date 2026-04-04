@@ -2,7 +2,7 @@
 # This file is loaded by realtime_controller.py
 
 # Path to depRL checkpoint directory (required)
-checkpoint_path: ""
+checkpoint_path: "/home/ntk/Documents/depRL/scheme_b_imu"
 
 # Control loop frequency (Hz)
 control_freq_hz: 50
@@ -19,8 +19,8 @@ obs_dim: 125
 action_dim: 20
 
 # External input config (defines which obs indices the agent actually sees)
-# HardwareWrapper extracts these from the 125-dim obs → 11-dim for IMU-only
-external_input_config: "external_input_config_simple_imu.txt"
+# HardwareEnv uses these indices to map real sensor data → 11-dim for IMU-only
+external_input_config_path: "external_input_config_simple_imu.txt"
 
 # Hardware sensors
 enable_imu: true

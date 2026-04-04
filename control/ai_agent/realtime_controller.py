@@ -26,20 +26,133 @@ import numpy as np
 import yaml
 
 # Ensure depRL is importable
-_DEPRL_ROOT = Path(__file__).resolve().parents[3]  # -> ExoPulse/
-_DEPRL_PATH = _DEPRL_ROOT / "depRL"
+_DEPRL_ROOT = Path(__file__).resolve().parents[3]  # -> depRL/ repo root
+# Try both possible layouts: depRL/firmware_layer/... and ExoPulse/depRL/firmware_layer/...
+for _candidate in [_DEPRL_ROOT, _DEPRL_ROOT / "depRL"]:
+    if (_candidate / "deprl").is_dir():
+        _DEPRL_PATH = _candidate
+        break
+else:
+    _DEPRL_PATH = _DEPRL_ROOT
 if str(_DEPRL_PATH) not in sys.path:
     sys.path.insert(0, str(_DEPRL_PATH))
 
-from deprl.env_wrappers.scone_wrapper import RealtimeSmoothingFilter, ButterworthFilter
+# Inline filters to avoid importing deprl (which requires gym/SCONE)
+class RealtimeSmoothingFilter:
+    """EMA smoothing filter for actuator inputs."""
+    def __init__(self, alpha=0.3):
+        self.alpha = alpha
+        self.previous_values = {}
+    def reset(self):
+        self.previous_values = {}
+    def filter(self, values, indices):
+        out = values.copy()
+        for idx in indices:
+            if idx not in self.previous_values:
+                self.previous_values[idx] = values[idx]
+            else:
+                out[idx] = self.alpha * values[idx] + (1.0 - self.alpha) * self.previous_values[idx]
+            self.previous_values[idx] = out[idx]
+        return out
 
-try:
-    from deprl.env_wrappers.hardware_wrapper import HardwareEnv, HardwareWrapper
-except ImportError:
-    sys.path.insert(0, str(_DEPRL_PATH))
-    from deprl.env_wrappers.hardware_wrapper import HardwareEnv, HardwareWrapper
+
+class ButterworthFilter:
+    """Real-time Butterworth low-pass filter."""
+    def __init__(self, cutoff_freq=5.0, sampling_freq=100.0, order=2):
+        from scipy import signal as sig
+        nyquist = 0.5 * sampling_freq
+        self.sos = sig.butter(order, cutoff_freq / nyquist, btype='low', output='sos')
+        self._sig = sig
+        self.filter_states = {}
+    def reset(self):
+        self.filter_states = {}
+    def filter(self, values, indices):
+        out = values.copy()
+        for idx in indices:
+            if idx not in self.filter_states:
+                self.filter_states[idx] = self._sig.sosfilt_zi(self.sos) * values[idx]
+            filtered_val, self.filter_states[idx] = self._sig.sosfilt(
+                self.sos, [values[idx]], zi=self.filter_states[idx])
+            out[idx] = filtered_val[0]
+        return out
+
+
+# Import HardwareEnv directly — add its directory to sys.path
+# so Python can find it without going through deprl.__init__
+_hw_dir = str(_DEPRL_PATH / "deprl" / "env_wrappers")
+if _hw_dir not in sys.path:
+    sys.path.insert(0, _hw_dir)
+from hardware_wrapper import HardwareEnv
 
 logger = logging.getLogger("ai_agent")
+
+
+# ─── Standalone Expert (for MoE checkpoints without SCONE) ──────
+class _StandaloneExpert:
+    """Loads a single Expert 3 actor network from a .pt checkpoint.
+
+    Architecture: Linear(11,128)->ReLU->Linear(128,128)->ReLU
+                  ->Linear(128,64)->ReLU->Linear(64,2)->Tanh
+    Input: 11D (7D IMU + 4D exo state)
+    Output: 2D torque actions in [-1, 1]
+    """
+
+    def __init__(self, checkpoint_file: str):
+        import torch
+        cp = torch.load(checkpoint_file, map_location="cpu")
+
+        self._mean = cp["actor.encoder.observation_normalizer._mean"].float()
+        self._std = torch.clamp(
+            cp["actor.encoder.observation_normalizer._std"].float(), min=1e-6)
+
+        # Torso layers
+        self._w0 = cp["actor.torso.model.0.weight"].float()
+        self._b0 = cp["actor.torso.model.0.bias"].float()
+        self._w1 = cp["actor.torso.model.2.weight"].float()
+        self._b1 = cp["actor.torso.model.2.bias"].float()
+        self._w2 = cp["actor.torso.model.4.weight"].float()
+        self._b2 = cp["actor.torso.model.4.bias"].float()
+
+        # Head (tanh output)
+        self._wo = cp["actor.head.action_layer.0.weight"].float()
+        self._bo = cp["actor.head.action_layer.0.bias"].float()
+
+        self._obs_dim = int(self._mean.shape[0])
+        logger.info("Expert3 loaded: %dD -> 2D, file=%s",
+                     self._obs_dim, Path(checkpoint_file).name)
+
+    def test_step(self, obs, steps=0):
+        """Run forward pass. obs can be full 125D (external indices extracted
+        by HardwareEnv) or raw 11D."""
+        import torch
+        obs = np.asarray(obs, dtype=np.float32).flatten()
+
+        # If full SCONE obs vector, extract external input indices
+        # IMU: [72:79], Exo: [121:125]
+        if len(obs) > self._obs_dim:
+            obs = np.concatenate([obs[72:79], obs[121:125]])
+
+        # Debug: log input every 50 steps
+        self._dbg_cnt = getattr(self, '_dbg_cnt', 0) + 1
+        if self._dbg_cnt % 50 == 1:
+            logger.info("NN input (11D): %s", np.array2string(obs, precision=3, suppress_small=True))
+
+        x = torch.from_numpy(obs).unsqueeze(0)
+        x = (x - self._mean) / self._std
+        x = torch.relu(x @ self._w0.T + self._b0)
+        x = torch.relu(x @ self._w1.T + self._b1)
+        x = torch.relu(x @ self._w2.T + self._b2)
+        x = torch.tanh(x @ self._wo.T + self._bo)
+        actions_2d = x.squeeze(0).numpy()
+
+        # Embed back into 20D action space (18 muscles + 2 exo)
+        full_action = np.zeros(20, dtype=np.float32)
+        full_action[18] = actions_2d[0]  # right hip
+        full_action[19] = actions_2d[1]  # left hip
+        return full_action
+
+    def noisy_test_step(self, obs, steps=0):
+        return self.test_step(obs, steps)
 
 
 # ─── Safety Pipeline ────────────────────────────────────────────
@@ -231,7 +344,7 @@ class RealtimeControllerConfig:
     iq_limit: int = 800
     obs_dim: int = 125
     action_dim: int = 20
-    external_input_config: str = "external_input_config_simple_imu.txt"
+    external_input_config_path: str = "external_input_config_simple_imu.txt"
     enable_imu: bool = True
     enable_emg: bool = False
     enable_motor: bool = True
@@ -326,10 +439,9 @@ class RealtimeController:
         #    HardwareWrapper: extracts external_indices → 11-dim obs for agent
         try:
             logger.info("Creating HardwareEnv + HardwareWrapper ...")
-            base_env = HardwareEnv(
+            self._env = HardwareEnv(
                 obs_dim=cfg.obs_dim,
                 action_dim=cfg.action_dim,
-                external_input_config_path=cfg.external_input_config,
                 hardware_config={
                     "enable_imu": cfg.enable_imu,
                     "enable_motor": cfg.enable_motor,
@@ -338,25 +450,19 @@ class RealtimeController:
                 step_size=1.0 / cfg.control_freq_hz,
                 external_scale=cfg.external_scale,
                 iq_limit=cfg.iq_limit,
+                external_input_config_path=cfg.external_input_config_path,
             )
-            # Wrap with HardwareWrapper (default mode: obs[external_indices] only)
-            self._env = HardwareWrapper(base_env)
-            ext_dim = len(self._env.external_indices)
-            logger.info("HardwareWrapper created (external_indices=%d dims)", ext_dim)
+            logger.info("HardwareEnv created")
         except Exception as e:
             logger.error("Failed to create HardwareEnv: %s", e, exc_info=True)
             self._set_state(ControllerState.ERROR)
             return False
 
-        # 2) Load agent (HardwareWrapper provides correct observation_space)
+        # 2) Load agent
         try:
             logger.info("Loading agent from %s ...", cfg.checkpoint_path)
-            from deprl.utils.load_utils import load as deprl_load
-
-            self._agent = deprl_load(cfg.checkpoint_path, self._env)
-            logger.info("Agent loaded (obs=%s, act=%s)",
-                        self._env.observation_space.shape,
-                        self._env.action_space.shape)
+            self._agent = self._load_agent(cfg.checkpoint_path)
+            logger.info("Agent loaded successfully")
         except Exception as e:
             logger.error("Failed to load agent: %s", e, exc_info=True)
             self._set_state(ControllerState.ERROR)
@@ -398,6 +504,31 @@ class RealtimeController:
         self._set_state(ControllerState.IDLE)
         logger.info("Initialization complete")
         return True
+
+    def _load_agent(self, checkpoint_path: str):
+        """Load agent, supporting both standard and MoE checkpoint layouts.
+
+        For MoE checkpoints (expert_3/step_*.pt), loads the actor network
+        directly without requiring SCONE simulation.
+        """
+        import torch
+        cp_path = Path(checkpoint_path)
+
+        # Check for MoE layout: checkpoints/expert_3/step_*.pt
+        expert3_dir = cp_path / "checkpoints" / "expert_3"
+        if expert3_dir.is_dir():
+            # Find latest checkpoint
+            pts = sorted(expert3_dir.glob("step_*.pt"),
+                         key=lambda p: int(p.stem.split("_")[1]))
+            if not pts:
+                raise FileNotFoundError(f"No step_*.pt in {expert3_dir}")
+            ckpt_file = pts[-1]
+            logger.info("Loading MoE Expert 3: %s", ckpt_file.name)
+            return _StandaloneExpert(str(ckpt_file))
+
+        # Fallback: standard deprl checkpoint
+        from deprl.utils.load_utils import load as deprl_load
+        return deprl_load(checkpoint_path, self._env)
 
     def start(self):
         """Start the control loop in a background thread."""
