@@ -106,17 +106,13 @@ def _load_checkpoint_weights(checkpoint_file: str) -> dict:
         import torch
     except ImportError:
         raise RuntimeError(
-            f"No .npz found at {npz_file}. "
-            f"Run once with torch to convert: "
-            f"python -c \"import torch,numpy as np; "
-            f"cp=torch.load('{checkpoint_file}',map_location='cpu'); "
-            f"np.savez('{npz_file}', **{{k:cp[k].float().numpy() for k in ["
-            f"'actor.encoder.observation_normalizer._mean',"
-            f"'actor.encoder.observation_normalizer._std',"
-            f"'actor.torso.model.0.weight','actor.torso.model.0.bias',"
-            f"'actor.torso.model.2.weight','actor.torso.model.2.bias',"
-            f"'actor.torso.model.4.weight','actor.torso.model.4.bias',"
-            f"'actor.head.action_layer.0.weight','actor.head.action_layer.0.bias']}})\"")
+            f"\n"
+            f"  找不到 {Path(npz_file).name}，且 torch 未安裝。\n"
+            f"  請先在有 torch 的環境執行一次性轉換：\n\n"
+            f"    conda activate forward_sim\n"
+            f"    python convert_checkpoint.py {checkpoint_file}\n\n"
+            f"  或參考 README.md 說明。"
+        )
     cp = torch.load(checkpoint_file, map_location="cpu")
     weights = {}
     for key in [
