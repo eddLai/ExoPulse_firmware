@@ -88,8 +88,41 @@ logger = logging.getLogger("ai_agent")
 
 
 # ─── Standalone Expert (for MoE checkpoints without SCONE) ──────
+
+def _load_checkpoint_weights(checkpoint_file: str) -> dict:
+    """Load .pt checkpoint into numpy arrays.
+
+    Uses torch only at load time, then converts everything to numpy.
+    If a pre-converted .npz exists alongside the .pt, loads that instead
+    (zero torch dependency).
+    """
+    npz_file = checkpoint_file.replace(".pt", ".npz")
+    if os.path.exists(npz_file):
+        logger.info("Loading pre-converted weights: %s", Path(npz_file).name)
+        return dict(np.load(npz_file))
+
+    # One-time conversion: .pt → numpy arrays
+    import torch
+    cp = torch.load(checkpoint_file, map_location="cpu")
+    weights = {}
+    for key in [
+        "actor.encoder.observation_normalizer._mean",
+        "actor.encoder.observation_normalizer._std",
+        "actor.torso.model.0.weight", "actor.torso.model.0.bias",
+        "actor.torso.model.2.weight", "actor.torso.model.2.bias",
+        "actor.torso.model.4.weight", "actor.torso.model.4.bias",
+        "actor.head.action_layer.0.weight", "actor.head.action_layer.0.bias",
+    ]:
+        weights[key] = cp[key].float().numpy()
+
+    # Save .npz so torch is never needed again
+    np.savez(npz_file, **weights)
+    logger.info("Saved pre-converted weights to %s (torch no longer needed)", Path(npz_file).name)
+    return weights
+
+
 class _StandaloneExpert:
-    """Loads a single Expert 3 actor network from a .pt checkpoint.
+    """Expert 3 actor network — pure numpy, no torch/gym dependency.
 
     Architecture: Linear(11,128)->ReLU->Linear(128,128)->ReLU
                   ->Linear(128,64)->ReLU->Linear(64,2)->Tanh
@@ -98,57 +131,49 @@ class _StandaloneExpert:
     """
 
     def __init__(self, checkpoint_file: str):
-        import torch
-        cp = torch.load(checkpoint_file, map_location="cpu")
+        w = _load_checkpoint_weights(checkpoint_file)
 
-        self._mean = cp["actor.encoder.observation_normalizer._mean"].float()
-        self._std = torch.clamp(
-            cp["actor.encoder.observation_normalizer._std"].float(), min=1e-6)
+        self._mean = w["actor.encoder.observation_normalizer._mean"].astype(np.float32)
+        self._std = np.maximum(
+            w["actor.encoder.observation_normalizer._std"].astype(np.float32), 1e-6)
 
         # Torso layers
-        self._w0 = cp["actor.torso.model.0.weight"].float()
-        self._b0 = cp["actor.torso.model.0.bias"].float()
-        self._w1 = cp["actor.torso.model.2.weight"].float()
-        self._b1 = cp["actor.torso.model.2.bias"].float()
-        self._w2 = cp["actor.torso.model.4.weight"].float()
-        self._b2 = cp["actor.torso.model.4.bias"].float()
+        self._w0 = w["actor.torso.model.0.weight"].astype(np.float32)
+        self._b0 = w["actor.torso.model.0.bias"].astype(np.float32)
+        self._w1 = w["actor.torso.model.2.weight"].astype(np.float32)
+        self._b1 = w["actor.torso.model.2.bias"].astype(np.float32)
+        self._w2 = w["actor.torso.model.4.weight"].astype(np.float32)
+        self._b2 = w["actor.torso.model.4.bias"].astype(np.float32)
 
         # Head (tanh output)
-        self._wo = cp["actor.head.action_layer.0.weight"].float()
-        self._bo = cp["actor.head.action_layer.0.bias"].float()
+        self._wo = w["actor.head.action_layer.0.weight"].astype(np.float32)
+        self._bo = w["actor.head.action_layer.0.bias"].astype(np.float32)
 
-        self._obs_dim = int(self._mean.shape[0])
-        logger.info("Expert3 loaded: %dD -> 2D, file=%s",
+        self._obs_dim = len(self._mean)
+        logger.info("Expert3 loaded (numpy): %dD -> 2D, file=%s",
                      self._obs_dim, Path(checkpoint_file).name)
 
     def test_step(self, obs, steps=0):
-        """Run forward pass. obs can be full 125D (external indices extracted
-        by HardwareEnv) or raw 11D."""
-        import torch
+        """Pure numpy forward pass — no torch needed."""
         obs = np.asarray(obs, dtype=np.float32).flatten()
 
-        # If full SCONE obs vector, extract external input indices
-        # IMU: [72:79], Exo: [121:125]
+        # If full 125D obs, extract external input indices
         if len(obs) > self._obs_dim:
             obs = np.concatenate([obs[72:79], obs[121:125]])
 
-        # Debug: log input every 50 steps
-        self._dbg_cnt = getattr(self, '_dbg_cnt', 0) + 1
-        if self._dbg_cnt % 50 == 1:
-            logger.info("NN input (11D): %s", np.array2string(obs, precision=3, suppress_small=True))
+        # Normalize
+        x = (obs - self._mean) / self._std
 
-        x = torch.from_numpy(obs).unsqueeze(0)
-        x = (x - self._mean) / self._std
-        x = torch.relu(x @ self._w0.T + self._b0)
-        x = torch.relu(x @ self._w1.T + self._b1)
-        x = torch.relu(x @ self._w2.T + self._b2)
-        x = torch.tanh(x @ self._wo.T + self._bo)
-        actions_2d = x.squeeze(0).numpy()
+        # Forward pass (pure numpy)
+        x = np.maximum(0, x @ self._w0.T + self._b0)   # ReLU
+        x = np.maximum(0, x @ self._w1.T + self._b1)   # ReLU
+        x = np.maximum(0, x @ self._w2.T + self._b2)   # ReLU
+        x = np.tanh(x @ self._wo.T + self._bo)          # Tanh → [-1, 1]
 
-        # Embed back into 20D action space (18 muscles + 2 exo)
+        # Embed into 20D action space (only indices 18, 19 are exo)
         full_action = np.zeros(20, dtype=np.float32)
-        full_action[18] = actions_2d[0]  # right hip
-        full_action[19] = actions_2d[1]  # left hip
+        full_action[18] = x[0]  # right hip
+        full_action[19] = x[1]  # left hip
         return full_action
 
     def noisy_test_step(self, obs, steps=0):
@@ -511,7 +536,6 @@ class RealtimeController:
         For MoE checkpoints (expert_3/step_*.pt), loads the actor network
         directly without requiring SCONE simulation.
         """
-        import torch
         cp_path = Path(checkpoint_path)
 
         # Check for MoE layout: checkpoints/expert_3/step_*.pt
