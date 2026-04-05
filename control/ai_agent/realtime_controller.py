@@ -101,8 +101,22 @@ def _load_checkpoint_weights(checkpoint_file: str) -> dict:
         logger.info("Loading pre-converted weights: %s", Path(npz_file).name)
         return dict(np.load(npz_file))
 
-    # One-time conversion: .pt → numpy arrays
-    import torch
+    # One-time conversion: .pt → numpy arrays (requires torch)
+    try:
+        import torch
+    except ImportError:
+        raise RuntimeError(
+            f"No .npz found at {npz_file}. "
+            f"Run once with torch to convert: "
+            f"python -c \"import torch,numpy as np; "
+            f"cp=torch.load('{checkpoint_file}',map_location='cpu'); "
+            f"np.savez('{npz_file}', **{{k:cp[k].float().numpy() for k in ["
+            f"'actor.encoder.observation_normalizer._mean',"
+            f"'actor.encoder.observation_normalizer._std',"
+            f"'actor.torso.model.0.weight','actor.torso.model.0.bias',"
+            f"'actor.torso.model.2.weight','actor.torso.model.2.bias',"
+            f"'actor.torso.model.4.weight','actor.torso.model.4.bias',"
+            f"'actor.head.action_layer.0.weight','actor.head.action_layer.0.bias']}})\"")
     cp = torch.load(checkpoint_file, map_location="cpu")
     weights = {}
     for key in [
@@ -550,9 +564,10 @@ class RealtimeController:
             logger.info("Loading MoE Expert 3: %s", ckpt_file.name)
             return _StandaloneExpert(str(ckpt_file))
 
-        # Fallback: standard deprl checkpoint
-        from deprl.utils.load_utils import load as deprl_load
-        return deprl_load(checkpoint_path, self._env)
+        # Fallback: no expert_3 directory found
+        raise FileNotFoundError(
+            f"No MoE expert_3 checkpoint found in {cp_path}/checkpoints/expert_3/. "
+            f"Ensure the checkpoint directory has checkpoints/expert_3/step_*.pt (or .npz)")
 
     def start(self):
         """Start the control loop in a background thread."""
