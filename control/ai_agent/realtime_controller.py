@@ -192,49 +192,47 @@ class _StandaloneExpert:
 
 # ─── Safety Pipeline ────────────────────────────────────────────
 
-class MotorProtection:
-    """Stage 1: Protect the motor hardware.
+class TorqueConditioner:
+    """Signal conditioning for AI torque output.
+
+    Applies smoothing and startup ramp to the RL agent's action vector.
+    Hard safety limits (iq clamp, angle limits, E-stop) are handled by
+    C++ MotorProtection in the transport layer.
 
     Applied in order:
-        1. iq_limit clamp   — hard current ceiling
-        2. Smoothing filter  — EMA or Butterworth low-pass
-        3. Torque ramp       — linear 0→100 % over startup period
+        1. Smoothing filter  — EMA or Butterworth low-pass
+        2. Torque ramp       — linear 0→100 % over startup period
     """
 
-    def __init__(self, iq_limit: int, exo_indices: list[int],
-                 smoothing_filter, torque_ramp_seconds: float,
-                 external_scale: float):
-        self._iq_limit = iq_limit
+    def __init__(self, exo_indices: list[int],
+                 smoothing_filter, torque_ramp_seconds: float):
         self._exo_indices = exo_indices
         self._filter = smoothing_filter
         self._ramp_seconds = torque_ramp_seconds
-        self._external_scale = external_scale
 
     def reset(self):
         if self._filter:
             self._filter.reset()
 
     def apply(self, action: np.ndarray, elapsed: float) -> np.ndarray:
-        """Run all motor-protection stages on *action* (mutates a copy)."""
+        """Run signal conditioning on *action* (mutates a copy)."""
         action = action.copy()
 
-        # 1) iq_limit clamp (in action-space units, before external_scale)
-        if self._external_scale > 0:
-            max_action = self._iq_limit / self._external_scale
-            for idx in self._exo_indices:
-                action[idx] = np.clip(action[idx], -max_action, max_action)
-
-        # 2) Smoothing filter
+        # 1) Smoothing filter
         if self._filter:
             action = self._filter.filter(action, self._exo_indices)
 
-        # 3) Torque ramp
+        # 2) Torque ramp
         if elapsed < self._ramp_seconds:
             ramp = elapsed / self._ramp_seconds
             for idx in self._exo_indices:
                 action[idx] *= ramp
 
         return action
+
+
+# Keep old name as alias for backward compatibility during transition
+MotorProtection = TorqueConditioner
 
 
 class HumanProtection:
@@ -341,7 +339,7 @@ class TorqueSafetyPipeline:
     followed by rate-limited motor output.
     """
 
-    def __init__(self, motor_protection: MotorProtection,
+    def __init__(self, motor_protection: TorqueConditioner,
                  human_protection: HumanProtection,
                  rate_limiter: MotorRateLimiter,
                  exo_indices: list[int]):
@@ -515,12 +513,10 @@ class RealtimeController:
         else:
             smoothing = RealtimeSmoothingFilter(alpha=cfg.ema_alpha)
 
-        motor_prot = MotorProtection(
-            iq_limit=cfg.iq_limit,
+        motor_prot = TorqueConditioner(
             exo_indices=exo_indices,
             smoothing_filter=smoothing,
             torque_ramp_seconds=cfg.torque_ramp_seconds,
-            external_scale=cfg.external_scale,
         )
         human_prot = HumanProtection()
         rate_limiter = MotorRateLimiter(
@@ -680,8 +676,8 @@ class RealtimeController:
 
                 # 5) Compute torque values for telemetry (use last sent action)
                 sent = self._safety.rate_limiter.last_sent_action
-                torque_r = float(np.clip(sent[18] * cfg.external_scale, -cfg.iq_limit, cfg.iq_limit))
-                torque_l = float(np.clip(sent[19] * cfg.external_scale, -cfg.iq_limit, cfg.iq_limit))
+                torque_r = float(sent[18] * cfg.external_scale)
+                torque_l = float(sent[19] * cfg.external_scale)
 
                 # 6) Update telemetry
                 with self._lock:

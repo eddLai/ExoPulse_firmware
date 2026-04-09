@@ -31,31 +31,22 @@ class MotorController(ABC):
         self.transport = transport
         self.motor_id = motor_id
         self.safety = safety or SafetyConfig()
-        self._stopped = False
 
     def update(self, target_value: float) -> MotorResponse:
-        """Send one control command with safety protection.
+        """Send one control command with UI soft-limit clamping.
+
+        Hard safety (angle limits, torque limits, E-stop, hardware errors)
+        is enforced by C++ MotorProtection in the transport layer.
 
         Args:
             target_value: iq for torque controllers, degrees for position.
 
         Returns:
-            MotorResponse (may contain error_msg from safety checks).
+            MotorResponse (may contain warning messages).
         """
-        # 1. Clamp input to safe range
         target_value = self._clamp_input(target_value)
-
-        # 2. Reject if safety-stopped
-        if self._stopped:
-            return MotorResponse.fail(
-                self.motor_id,
-                "SAFETY_STOPPED: call reset() to resume")
-
-        # 3. Execute subclass control logic
         response = self._execute(target_value)
-
-        # 4. Check response safety
-        return self._check_response_safety(response)
+        return self._add_warnings(response)
 
     @abstractmethod
     def _execute(self, target_value: float) -> MotorResponse:
@@ -74,43 +65,29 @@ class MotorController(ABC):
     def control_mode(self) -> str:
         """Return 'torque', 'position', or 'pid_position'."""
 
-    # ---- Safety internals ----
+    # ---- UI soft limits (Layer 2) ----
 
     def _clamp_input(self, value: float) -> float:
-        """Clamp input based on control mode."""
+        """Clamp input based on control mode (user-adjustable soft limit)."""
         if self.control_mode == "torque":
             return max(-self.safety.max_iq, min(self.safety.max_iq, value))
         elif self.control_mode in ("position", "pid_position"):
             return max(-self.safety.max_angle, min(self.safety.max_angle, value))
         return value
 
-    def _check_response_safety(self, response: MotorResponse) -> MotorResponse:
-        """Check motor feedback for unsafe conditions."""
+    def _add_warnings(self, response: MotorResponse) -> MotorResponse:
+        """Add informational warnings for UI display (no stopping)."""
         if not response.success:
             return response
 
-        # Over-temperature → emergency stop
-        if response.temperature > self.safety.max_temperature:
-            self._emergency_stop()
-            response.error_msg = (
-                f"OVER_TEMP: {response.temperature}°C "
-                f"> {self.safety.max_temperature}°C")
-            return response
-
-        # Error state → emergency stop
-        if response.error_state != 0 and self.safety.error_auto_stop:
-            self._emergency_stop()
-            response.error_msg = f"ERROR_STATE: 0x{response.error_state:02X}"
-            return response
-
-        # Over-current → warning (no stop)
+        # Over-current → warning
         if (response.torque_current != 0.0
                 and abs(response.torque_current) > self.safety.max_current):
             response.error_msg = (
                 f"HIGH_CURRENT: {response.torque_current:.1f}A "
                 f"> {self.safety.max_current}A")
 
-        # Low voltage → warning (no stop)
+        # Low voltage → warning
         if (response.voltage > 0
                 and response.voltage < self.safety.low_voltage_threshold):
             msg = (f"LOW_VOLTAGE: {response.voltage:.1f}V "
@@ -119,18 +96,6 @@ class MotorController(ABC):
                 f"{response.error_msg}; {msg}" if response.error_msg else msg)
 
         return response
-
-    def _emergency_stop(self):
-        """Stop motor and block further commands."""
-        self._stopped = True
-        try:
-            self.transport.send_stop(self.motor_id)
-        except Exception:
-            pass  # Best-effort stop
-
-    def reset(self):
-        """Clear safety stop, allowing commands again."""
-        self._stopped = False
 
 
 class DirectTorqueController(MotorController):
@@ -281,8 +246,7 @@ class PIDPositionController(MotorController):
         self._prev_time = 0.0
 
     def reset(self):
-        """Clear safety stop AND reset PID state."""
-        super().reset()
+        """Reset PID state."""
         self.reset_pid()
 
     @property

@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+DEPRECATED: This monolithic GUI uses ctypes and is superseded by:
+  - motor_api.py + motor_controller.py + transports/ (pybind11-based architecture)
+  - local_UI/components/motor_control_panel.py (new PySide6 UI)
+
+Only kept for backward compatibility with scripts/gui.py.
+Remove once scripts/gui.py is updated.
+
 ExoPulse Integrated Motor Controller & Monitor GUI
 
 Features:

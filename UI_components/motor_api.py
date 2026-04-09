@@ -109,14 +109,14 @@ class MotorAPI:
     def set_torque(self, motor_id: int, iq: int) -> MotorResponse:
         """Send torque command via the motor's controller.
 
-        If the motor has a torque controller, calls update(iq).
-        Otherwise sends directly via transport (still clamped by safety).
+        If the motor has a torque controller, calls update(iq) which applies
+        UI soft limits. C++ MotorProtection in the transport layer enforces
+        the hard safety limits.
         """
         ctrl = self._controllers.get(motor_id)
         if ctrl and ctrl.control_mode == "torque":
             return ctrl.update(float(iq))
-        # Fallback: direct transport call with safety clamping
-        iq = max(-self._safety.max_iq, min(self._safety.max_iq, iq))
+        # Fallback: direct transport call (C++ MotorProtection handles limits)
         return self._transport.send_torque(motor_id, iq)
 
     def set_position(self, motor_id: int, angle_deg: float,
@@ -124,14 +124,14 @@ class MotorAPI:
         """Send position command via the motor's controller.
 
         Works with DirectPositionController or PIDPositionController.
+        UI soft limits are applied by the controller. C++ MotorProtection
+        provides hard angle limits in the transport layer.
         """
         ctrl = self._controllers.get(motor_id)
         if ctrl and ctrl.control_mode in ("position", "pid_position"):
             return ctrl.update(angle_deg)
         # Fallback: direct transport if it supports position
         if "position" in self._transport.supported_commands:
-            angle_deg = max(-self._safety.max_angle,
-                            min(self._safety.max_angle, angle_deg))
             return self._transport.send_position(motor_id, angle_deg, max_speed)
         return MotorResponse.fail(
             motor_id, "No position controller configured and transport "
@@ -210,15 +210,47 @@ class MotorAPI:
         return self._transport.read_status(motor_id)
 
     def reset(self, motor_id: int):
-        """Reset safety stop for a motor's controller."""
+        """Reset controller state (e.g. PID integrator).
+
+        For C++ emergency stop reset, use get_protection() directly.
+        """
         ctrl = self._controllers.get(motor_id)
-        if ctrl:
+        if ctrl and hasattr(ctrl, 'reset'):
             ctrl.reset()
 
     def reset_all(self):
-        """Reset safety stop for all controllers."""
+        """Reset all controller states."""
         for ctrl in self._controllers.values():
-            ctrl.reset()
+            if hasattr(ctrl, 'reset'):
+                ctrl.reset()
+
+    # ---- C++ Protection Config ----
+
+    def get_protection(self, motor_id: int):
+        """Return the C++ MotorProtection wrapper for a motor (or None).
+
+        Only available when transport supports it (e.g. CANDirectTransport).
+        """
+        if hasattr(self._transport, 'get_protection'):
+            return self._transport.get_protection(motor_id)
+        return None
+
+    def set_torque_limit_nm(self, motor_id: int, limit_nm: float):
+        """Update C++ MotorProtection torque limit for a motor."""
+        prot = self.get_protection(motor_id)
+        if prot:
+            cfg = prot.get_config()
+            cfg.torque_max_nm = limit_nm
+            prot.set_config(cfg)
+
+    def set_angle_limits(self, motor_id: int, min_deg: float, max_deg: float):
+        """Update C++ MotorProtection angle limits for a motor."""
+        prot = self.get_protection(motor_id)
+        if prot:
+            cfg = prot.get_config()
+            cfg.angle_min_deg = min_deg
+            cfg.angle_max_deg = max_deg
+            prot.set_config(cfg)
 
     # ---- Info ----
 
@@ -232,7 +264,6 @@ class MotorAPI:
                 mid: {
                     'controller': type(ctrl).__name__,
                     'control_mode': ctrl.control_mode,
-                    'safety_stopped': ctrl._stopped,
                 }
                 for mid, ctrl in self._controllers.items()
             },

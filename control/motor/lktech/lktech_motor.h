@@ -19,8 +19,7 @@
 
 #include "../motor_base.h"
 #include <cstdint>
-
-struct timespec;  /* forward declaration */
+#include <time.h>
 
 class LktechMotor : public Motor {
 public:

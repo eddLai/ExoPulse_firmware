@@ -1,8 +1,7 @@
 """
-CAN Direct Transport - MCP2515 SPI -> libexo_motor.so -> LK-TECH motors.
+CAN Direct Transport - MCP2515 SPI -> exo_motor (pybind11) -> LK-TECH motors.
 
-Wraps the existing CANDirectBackend from motor_control.py into the
-MotorTransport interface with unified MotorResponse output.
+Uses the pybind11 exo_motor module to directly hold C++ LktechMotor objects.
 
 Architecture:
   - Command register: holds latest pending command per motor (overwrite semantics)
@@ -12,9 +11,7 @@ Architecture:
 """
 from __future__ import annotations
 
-import ctypes
 import os
-import queue
 import sys
 import threading
 import time
@@ -28,44 +25,36 @@ if _PARENT not in sys.path:
 from motor_types import MotorResponse
 from motor_transport import MotorTransport
 
+# Import pybind11 motor module
+_MOTOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "..", "control", "motor")
+if _MOTOR_DIR not in sys.path:
+    sys.path.insert(0, _MOTOR_DIR)
 
-class _MotorStatusCTypes(ctypes.Structure):
-    """ctypes mirror of motor_status_t from lktech_motor.h"""
-    _fields_ = [
-        ("temperature", ctypes.c_int8),
-        ("torque_current", ctypes.c_int16),
-        ("speed", ctypes.c_int16),
-        ("acceleration", ctypes.c_int32),
-        ("angle", ctypes.c_int64),
-        ("encoder", ctypes.c_uint32),
-        ("voltage", ctypes.c_uint16),
-        ("error_state", ctypes.c_uint8),
-    ]
-
-
-# Library search paths
-_LIB_SEARCH_PATHS = [
-    os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                 "..", "..", "control", "motor", "libexo_motor.so"),
-    os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                 "..", "control", "motor", "libexo_motor.so"),
-    "/home/ntk/ExoPulse/external/firmware_layer/control/motor/libexo_motor.so",
-]
+try:
+    import exo_motor
+    _EXO_MOTOR_AVAILABLE = True
+except ImportError as e:
+    _EXO_MOTOR_AVAILABLE = False
+    print(f"[CANDirect] exo_motor not available: {e}")
+    print(f"[CANDirect] Build it: cd {_MOTOR_DIR} && make")
 
 
-def _status_to_response(motor_id: int, status: _MotorStatusCTypes) -> MotorResponse:
-    """Convert ctypes MotorStatus to unified MotorResponse."""
+def _status_to_response(motor_id: int, status) -> MotorResponse:
+    """Convert exo_motor.MotorStatus or ProtectedStatus to unified MotorResponse."""
+    # ProtectedStatus wraps raw MotorStatus in .raw attribute
+    raw = status.raw if hasattr(status, 'raw') else status
     return MotorResponse(
         success=True,
         motor_id=motor_id,
-        temperature=float(status.temperature),
-        torque_current=status.torque_current * (33.0 / 2048.0),  # iq -> Amps
-        speed=float(status.speed),
-        acceleration=float(status.acceleration),
-        angle=status.angle * 0.01,  # 0.01 deg/LSB -> degrees
-        encoder=status.encoder,
-        voltage=status.voltage * 0.1,  # 0.1V/LSB -> Volts
-        error_state=status.error_state,
+        temperature=float(raw.temperature),
+        torque_current=raw.torque_current * (33.0 / 2048.0),  # iq -> Amps
+        speed=float(raw.speed),
+        acceleration=float(raw.acceleration),
+        angle=raw.angle * 0.01,  # 0.01 deg/LSB -> degrees
+        encoder=raw.encoder,
+        voltage=raw.voltage * 0.1,  # 0.1V/LSB -> Volts
+        error_state=raw.error_state,
     )
 
 
@@ -77,7 +66,7 @@ _PRIO_STATUS = 1
 class CANDirectTransport(MotorTransport):
     """Motor communication via MCP2515 SPI (Jetson Orin direct CAN).
 
-    Uses libexo_motor.so compiled from control/motor/.
+    Uses exo_motor pybind11 module (C++ LktechMotor objects directly).
     Supports: torque (0xA1), position (0xA4), status, stop.
 
     All CAN operations are serialized through a single worker thread.
@@ -87,21 +76,23 @@ class CANDirectTransport(MotorTransport):
 
     CONTROL_RATE_HZ = 30
 
-    def __init__(self, spi_device: bytes = b"/dev/spidev0.0",
+    def __init__(self, spi_device: str = "/dev/spidev0.0",
                  baud_rate: int = 1000000):
+        # Handle legacy bytes argument
+        if isinstance(spi_device, bytes):
+            spi_device = spi_device.decode()
         self._spi_device = spi_device
         self._baud_rate = baud_rate
-        self._lib = None
-        self._can = None
-        self._motors = {}  # {motor_id: handle}
+        self._can = None          # exo_motor.Mcp2515Can instance
+        self._motors = {}         # {motor_id: exo_motor.LktechMotor} (raw, for position)
+        self._protections = {}    # {motor_id: exo_motor.MotorProtection} (for torque)
         self._connected = False
         self._can_lock = threading.RLock()
 
-        # Command register: {(priority, motor_id): (func, event, result_holder)}
-        # Using dict with overwrite semantics - latest command wins per motor+priority
+        # Command register: {motor_id: (func, event, result_holder)}
         self._reg_lock = threading.Lock()
-        self._control_reg = {}   # {motor_id: (func, event, result_holder)}
-        self._status_reg = {}    # {motor_id: (func, event, result_holder)}
+        self._control_reg = {}
+        self._status_reg = {}
         self._cmd_available = threading.Event()
 
         # Worker thread
@@ -114,73 +105,43 @@ class CANDirectTransport(MotorTransport):
 
     def connect(self, motor_ids=(0x141, 0x142), **kwargs) -> Tuple[bool, str]:
         """Initialize CAN bus and connect to motors."""
-        # Find library
-        lib_path = None
-        for path in _LIB_SEARCH_PATHS:
-            if os.path.exists(path):
-                lib_path = path
-                break
-        if not lib_path:
-            return False, "libexo_motor.so not found. Run: cd control/motor && make"
+        if not _EXO_MOTOR_AVAILABLE:
+            return False, "exo_motor module not available. Run: cd control/motor && make"
 
+        # Create CAN bus
         try:
-            self._lib = ctypes.CDLL(lib_path)
-        except OSError as e:
-            return False, f"Failed to load library: {e}"
+            self._can = exo_motor.Mcp2515Can(self._spi_device)
+        except RuntimeError as e:
+            return False, f"Failed to create MCP2515: {e}"
 
-        # Setup ctypes signatures
-        self._lib.mcp2515_create.restype = ctypes.c_void_p
-        self._lib.mcp2515_create.argtypes = [ctypes.c_char_p, ctypes.c_uint32]
-        self._lib.mcp2515_init.restype = ctypes.c_int
-        self._lib.mcp2515_init.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-        self._lib.mcp2515_destroy.argtypes = [ctypes.c_void_p]
-
-        self._lib.motor_create.restype = ctypes.c_void_p
-        self._lib.motor_create.argtypes = [ctypes.c_void_p, ctypes.c_uint16]
-        self._lib.motor_init.restype = ctypes.c_int
-        self._lib.motor_init.argtypes = [ctypes.c_void_p]
-        self._lib.motor_set_torque.restype = ctypes.c_int
-        self._lib.motor_set_torque.argtypes = [
-            ctypes.c_void_p, ctypes.c_int16, ctypes.POINTER(_MotorStatusCTypes)]
-        self._lib.motor_set_position.restype = ctypes.c_int
-        self._lib.motor_set_position.argtypes = [
-            ctypes.c_void_p, ctypes.c_int32, ctypes.c_uint16,
-            ctypes.POINTER(_MotorStatusCTypes)]
-        self._lib.motor_read_status.restype = ctypes.c_int
-        self._lib.motor_read_status.argtypes = [
-            ctypes.c_void_p, ctypes.POINTER(_MotorStatusCTypes)]
-        self._lib.motor_stop.restype = ctypes.c_int
-        self._lib.motor_stop.argtypes = [ctypes.c_void_p]
-        self._lib.motor_shutdown.restype = ctypes.c_int
-        self._lib.motor_shutdown.argtypes = [ctypes.c_void_p]
-        self._lib.motor_destroy.argtypes = [ctypes.c_void_p]
-
-        # Initialize CAN bus
-        self._can = self._lib.mcp2515_create(self._spi_device, 1000000)
-        if not self._can:
-            return False, "Failed to create MCP2515 (check SPI device)"
-
-        if self._lib.mcp2515_init(self._can, self._baud_rate) < 0:
-            self._lib.mcp2515_destroy(self._can)
+        if self._can.init(self._baud_rate) < 0:
             self._can = None
             return False, "Failed to init MCP2515 (check SPI wiring)"
 
-        # Initialize motors
+        # Initialize motors with C++ MotorProtection wrapper
         results = []
         for mid in motor_ids:
-            handle = self._lib.motor_create(self._can, mid)
-            if not handle:
-                results.append(f"Motor 0x{mid:03X}: create failed")
-                continue
-            if self._lib.motor_init(handle) < 0:
-                self._lib.motor_destroy(handle)
-                results.append(f"Motor 0x{mid:03X}: no CAN response")
-                continue
-            self._motors[mid - 0x140] = handle  # 0x141->1, 0x142->2
-            results.append(f"Motor 0x{mid:03X}: OK")
+            name = f"motor_{mid:03X}"
+            try:
+                motor = exo_motor.LktechMotor(self._can, mid, name)
+                if motor.init() < 0:
+                    results.append(f"Motor 0x{mid:03X}: no CAN response")
+                    continue
+                # Wrap with C++ MotorProtection (angle ±45°, torque 150Nm, CLAMP mode)
+                config = exo_motor.ProtectConfig()
+                prot = exo_motor.MotorProtection(motor, config)
+                ret = prot.init()
+                if ret != exo_motor.MOTOR_OK:
+                    results.append(f"Motor 0x{mid:03X}: protection init failed ({ret})")
+                    continue
+                key = mid - 0x140  # 0x141->1, 0x142->2
+                self._motors[key] = motor       # raw motor for position commands
+                self._protections[key] = prot   # protected wrapper for torque
+                results.append(f"Motor 0x{mid:03X}: OK (protected)")
+            except Exception as e:
+                results.append(f"Motor 0x{mid:03X}: {e}")
 
-        if not self._motors:
-            self._lib.mcp2515_destroy(self._can)
+        if not self._protections:
             self._can = None
             return False, "No motors responded. " + "; ".join(results)
 
@@ -191,13 +152,14 @@ class CANDirectTransport(MotorTransport):
     def disconnect(self) -> None:
         self._stop_worker()
         with self._can_lock:
-            for handle in self._motors.values():
-                self._lib.motor_stop(handle)
-                self._lib.motor_destroy(handle)
+            for prot in self._protections.values():
+                try:
+                    prot.stop()
+                except Exception:
+                    pass
+            self._protections.clear()
             self._motors.clear()
-            if self._can:
-                self._lib.mcp2515_destroy(self._can)
-                self._can = None
+            self._can = None  # pybind11 destructor handles cleanup
         self._connected = False
 
     # ---- Worker thread ----
@@ -300,8 +262,7 @@ class CANDirectTransport(MotorTransport):
             # Overwrite any existing command for this motor (latest wins)
             old = self._control_reg.get(motor_id)
             if old:
-                # Cancel the previous pending command
-                old[1].set()  # event
+                old[1].set()
                 old[2][0] = MotorResponse.fail(motor_id, "Superseded by newer command")
             self._control_reg[motor_id] = (func, event, result_holder)
 
@@ -335,43 +296,42 @@ class CANDirectTransport(MotorTransport):
     # ---- Public API ----
 
     def send_torque(self, motor_id: int, iq: int) -> MotorResponse:
-        handle = self._motors.get(motor_id)
-        if not handle:
+        prot = self._protections.get(motor_id)
+        if not prot:
             return MotorResponse.fail(motor_id, f"Motor {motor_id} not connected")
 
         def execute():
-            status = _MotorStatusCTypes()
-            if self._lib.motor_set_torque(handle, int(iq),
-                                          ctypes.byref(status)) == 0:
+            ret, status = prot.set_torque_raw(int(iq))
+            if ret == exo_motor.MOTOR_OK:
                 return _status_to_response(motor_id, status)
-            return MotorResponse.fail(motor_id, "CAN torque command failed")
+            err_msg = exo_motor.MotorProtection.strerror(ret)
+            return MotorResponse.fail(motor_id, f"Torque rejected: {err_msg}")
 
         return self._submit_control(motor_id, execute)
 
     def send_position(self, motor_id: int, angle_deg: float,
                       max_speed: int = 700) -> MotorResponse:
-        handle = self._motors.get(motor_id)
-        if not handle:
+        motor = self._motors.get(motor_id)  # raw motor for position commands
+        if not motor:
             return MotorResponse.fail(motor_id, f"Motor {motor_id} not connected")
 
         def execute():
-            status = _MotorStatusCTypes()
             angle_001deg = int(angle_deg * 100)  # deg -> 0.01 deg/LSB
-            if self._lib.motor_set_position(handle, angle_001deg, int(max_speed),
-                                            ctypes.byref(status)) == 0:
+            ret, status = motor.set_position(angle_001deg, int(max_speed))
+            if ret == 0:
                 return _status_to_response(motor_id, status)
             return MotorResponse.fail(motor_id, "CAN position command failed")
 
         return self._submit_control(motor_id, execute)
 
     def read_status(self, motor_id: int) -> MotorResponse:
-        handle = self._motors.get(motor_id)
-        if not handle:
+        prot = self._protections.get(motor_id)
+        if not prot:
             return MotorResponse.fail(motor_id, f"Motor {motor_id} not connected")
 
         def execute():
-            status = _MotorStatusCTypes()
-            if self._lib.motor_read_status(handle, ctypes.byref(status)) == 0:
+            ret, status = prot.read_status()
+            if ret == exo_motor.MOTOR_OK:
                 return _status_to_response(motor_id, status)
             return MotorResponse.fail(motor_id, "CAN status read failed")
 
@@ -381,17 +341,21 @@ class CANDirectTransport(MotorTransport):
         """Stop command bypasses the queue for immediate execution."""
         if motor_id == 0:
             with self._can_lock:
-                for mid, handle in self._motors.items():
-                    self._lib.motor_stop(handle)
+                for prot in self._protections.values():
+                    prot.stop()
             return MotorResponse(success=True, motor_id=0)
 
-        handle = self._motors.get(motor_id)
-        if not handle:
+        prot = self._protections.get(motor_id)
+        if not prot:
             return MotorResponse.fail(motor_id, f"Motor {motor_id} not connected")
         with self._can_lock:
-            if self._lib.motor_stop(handle) == 0:
+            if prot.stop() == exo_motor.MOTOR_OK:
                 return MotorResponse(success=True, motor_id=motor_id)
         return MotorResponse.fail(motor_id, "CAN stop command failed")
+
+    def get_protection(self, motor_id: int):
+        """Return the C++ MotorProtection wrapper for a motor (or None)."""
+        return self._protections.get(motor_id)
 
     @property
     def is_connected(self) -> bool:
